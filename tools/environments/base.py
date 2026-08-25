@@ -597,6 +597,15 @@ def _export_dump_excluding_session_vars(
         # session-var leak this dump already guards against.
         "AI_AGENT HERMES_AGENT "
         f"HERMES_UI_SESSION_ID{extra_unset} 2>/dev/null; "
+        # 2026-08-14 security fix: credential env vars must never land in
+        # the /tmp snapshot (HINDSIGHT_API_LLM_API_KEY was leaked to
+        # /tmp/hermes-snap-*.sh). Name-prefix unset cannot express this, so
+        # iterate: any var whose NAME contains KEY/TOKEN/SECRET/PASSWORD is
+        # dropped from the dump, same principle as the session vars above.
+        "for __v in $(compgen -e); do "
+        "case \"$__v\" in "
+        "*KEY*|*key*|*TOKEN*|*token*|*SECRET*|*secret*|*PASSWORD*|*passwd*|*PASSWD*|*credential*|*CREDENTIAL*) unset \"$__v\" 2>/dev/null;; "
+        "esac; done; "
         "export -p; "
         ") || true; } "
         f"> {tmp_path}"
