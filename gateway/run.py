@@ -23419,6 +23419,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _footer_line = _bfl(
                     user_config=_load_gateway_config(),
                     platform_key=_platform_config_key(source.platform),
+                    profile=self._footer_profile_label(source),
                     provider=agent_result.get("provider"),
                     model=agent_result.get("model"),
                     context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
@@ -31255,6 +31256,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             getattr(source, "thread_id", None), getattr(source, "parent_chat_id", None),
         )
         return None
+
+    def _footer_profile_label(self, source: SessionSource) -> str:
+        """Resolve the profile name that served this turn (footer ``bot`` field).
+
+        Follows the same resolution order as
+        ``_resolve_profile_home_for_source``: ``source.profile``, then
+        profile routing, then the active profile. Never raises; falls back to
+        ``default`` so a footer render can never be blocked by routing state.
+        """
+        try:
+            name = (getattr(source, "profile", "") or "").strip()
+            if name:
+                return name
+            routed = self._profile_name_for_source(source)
+            if routed:
+                return routed
+            from hermes_cli.profiles import get_active_profile_name
+
+            return get_active_profile_name() or "default"
+        except Exception:
+            return "default"
 
     def _resolve_profile_home_for_source(self, source: SessionSource) -> "Path":
         """Resolve which profile's HERMES_HOME should serve this inbound source.

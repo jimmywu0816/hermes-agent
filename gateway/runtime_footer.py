@@ -17,6 +17,7 @@ Available fields:
     context_pct  — last-call context occupancy as a percent (``5%``)
     latency      — wall-clock duration of the turn (``22s``, ``1m05s``)
     cwd          — home-relative working dir (``~``)
+    bot          — active Hermes profile name (``finance``, ``default``)
 
 ``latency`` is opt-in: it is NOT in the default field set, so a footer whose
 ``fields`` are unset renders exactly as before.
@@ -74,7 +75,7 @@ def resolve_footer_config(
         2. ``display.runtime_footer``
         3. ``display.platforms.<platform_key>.runtime_footer``
     """
-    resolved = {"enabled": False, "fields": list(_DEFAULT_FIELDS)}
+    resolved = {"enabled": False, "fields": list(_DEFAULT_FIELDS), "bot_name": ""}
     cfg = (user_config or {}).get("display") or {}
 
     global_cfg = cfg.get("runtime_footer")
@@ -83,6 +84,8 @@ def resolve_footer_config(
             resolved["enabled"] = bool(global_cfg.get("enabled"))
         if isinstance(global_cfg.get("fields"), list) and global_cfg["fields"]:
             resolved["fields"] = [str(f) for f in global_cfg["fields"]]
+        if isinstance(global_cfg.get("bot_name"), str) and global_cfg["bot_name"]:
+            resolved["bot_name"] = global_cfg["bot_name"]
 
     if platform_key:
         platforms = cfg.get("platforms") or {}
@@ -94,6 +97,8 @@ def resolve_footer_config(
                     resolved["enabled"] = bool(plat_footer.get("enabled"))
                 if isinstance(plat_footer.get("fields"), list) and plat_footer["fields"]:
                     resolved["fields"] = [str(f) for f in plat_footer["fields"]]
+                if isinstance(plat_footer.get("bot_name"), str) and plat_footer["bot_name"]:
+                    resolved["bot_name"] = plat_footer["bot_name"]
 
     return resolved
 
@@ -117,6 +122,7 @@ def format_runtime_footer(
     context_length: Optional[int],
     cwd: Optional[str] = None,
     turn_seconds: Optional[float] = None,
+    bot_name: Optional[str] = None,
     fields: Iterable[str] = _DEFAULT_FIELDS,
 ) -> str:
     """Render the footer line, or return "" if no fields have data.
@@ -153,6 +159,11 @@ def format_runtime_footer(
             rel = _home_relative_cwd(cwd or env_cwd)
             if rel:
                 parts.append(rel)
+        elif field == "bot":
+            # Local extension: active profile/bot name (auto-derived, or set
+            # explicitly via display.runtime_footer.bot_name).
+            if bot_name:
+                parts.append(bot_name)
         # Unknown field names are silently ignored.
 
     if not parts:
@@ -164,6 +175,7 @@ def build_footer_line(
     *,
     user_config: dict[str, Any] | None,
     platform_key: str | None,
+    profile: Optional[str] = None,
     provider: Optional[str] = None,
     model: Optional[str],
     context_tokens: int,
@@ -191,5 +203,6 @@ def build_footer_line(
         context_length=context_length,
         cwd=cwd,
         turn_seconds=turn_seconds,
+        bot_name=cfg.get("bot_name") or (profile or "").strip() or "default",
         fields=cfg.get("fields") or _DEFAULT_FIELDS,
     )

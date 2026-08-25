@@ -136,6 +136,48 @@ def test_build_footer_line_threads_provider():
     assert out == "deepseek · deepseek-v4-flash"
 
 
+def test_build_footer_line_bot_uses_explicit_profile():
+    out = build_footer_line(
+        user_config={
+            "display": {
+                "runtime_footer": {
+                    "enabled": True,
+                    "fields": ["bot", "provider"],
+                }
+            }
+        },
+        platform_key="telegram",
+        profile="finance",
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        context_tokens=0,
+        context_length=None,
+        cwd="",
+    )
+    assert out == "finance · deepseek"
+
+
+def test_build_footer_line_bot_name_config_overrides_profile():
+    out = build_footer_line(
+        user_config={
+            "display": {
+                "runtime_footer": {
+                    "enabled": True,
+                    "fields": ["bot"],
+                    "bot_name": "Jimmy_Fin_bot",
+                }
+            }
+        },
+        platform_key="telegram",
+        profile="finance",
+        model="deepseek-v4-flash",
+        context_tokens=0,
+        context_length=None,
+        cwd="",
+    )
+    assert out == "Jimmy_Fin_bot"
+
+
 # ---------------------------------------------------------------------------
 # resolve_footer_config
 # ---------------------------------------------------------------------------
@@ -193,6 +235,7 @@ def test_build_footer_per_platform_off_suppresses():
         cwd="/tmp",
     )
     assert out == ""
+
 
 
 # ---------------------------------------------------------------------------
