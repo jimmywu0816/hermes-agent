@@ -1147,13 +1147,34 @@ export function pruneSecondaryGateways(keep: Set<string>): void {
   restoreActiveToPrimaryIfEvicted()
 }
 
-export function closeSecondaryGateways(): void {
-  for (const entry of g.secondaries.values()) {
+function closeSecondariesWhere(shouldClose: (entry: Secondary) => boolean): void {
+  for (const [scope, entry] of [...g.secondaries]) {
+    if (!shouldClose(entry)) {
+      continue
+    }
+
     disposeSecondary(entry)
+    g.secondaries.delete(scope)
   }
 
-  g.secondaries.clear()
   restoreActiveToPrimaryIfEvicted()
+}
+
+/**
+ * Close only profile sockets that follow the legacy v1 connection config.
+ *
+ * A global mode apply re-homes the primary backend, but registered connection
+ * sockets are independent sources in the v2 registry. Closing every secondary
+ * here would detach their sessions and arm `ws_orphan_reap` even though those
+ * sources remain valid and reusable. Legacy profile sockets still need to be
+ * retired because their endpoint is derived from the v1 config being changed.
+ */
+export function closeLegacySecondaryGateways(): void {
+  closeSecondariesWhere(entry => entry.connectionId == null)
+}
+
+export function closeSecondaryGateways(): void {
+  closeSecondariesWhere(() => true)
 }
 
 // A local profile can have two renderer-owned sockets: the legacy bare

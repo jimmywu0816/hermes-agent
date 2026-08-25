@@ -2,7 +2,7 @@ import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { $desktopBoot } from '@/store/boot'
-import { closeSecondaryGateways, isActivePrimary } from '@/store/gateway'
+import { activeGateway, closeSecondaryGateways, ensureGatewayForAgent, isActivePrimary } from '@/store/gateway'
 import { reconnectGateway } from '@/store/gateway-reconnect'
 import { $activeGatewayProfile, $profiles, ensureGatewayProfile } from '@/store/profile'
 import { $connection, $currentCwd, $gatewayState } from '@/store/session'
@@ -157,6 +157,15 @@ function fakeDesktop() {
 
       return !key || key === 'default' ? primaryConn : coderConn
     }),
+    getConnectionFor: vi.fn(async ({ connectionId, profile }: { connectionId: string; profile: string }) => ({
+      ...coderConn,
+      connectionId,
+      profile,
+      wsUrl: `wss://${connectionId}.example.com/api/ws?profile=${profile}`
+    })),
+    getGatewayWsUrlFor: vi.fn(async ({ connectionId, profile }: { connectionId: string; profile: string }) =>
+      `wss://${connectionId}.example.com/api/ws?profile=${profile}`
+    ),
     getGatewayWsUrl: vi.fn(async (conn?: { wsUrl?: string }) => conn?.wsUrl ?? primaryConn.wsUrl),
     getBootProgress: vi.fn(async () => ({
       error: null as null | string,
@@ -348,6 +357,33 @@ describe('useGatewayBoot remote reconnect loop (real hook, fake socket)', () => 
     expect(beforeConnectionSwitch).toHaveBeenCalledTimes(1)
     await flushAsync()
     expect($gatewayState.get()).toBe('open')
+  })
+
+  it('keeps registered source sockets alive during a legacy mode apply', async () => {
+    render(<Harness />)
+    await flushAsync()
+    expect($gatewayState.get()).toBe('open')
+
+    let opening!: Promise<boolean>
+    act(() => {
+      opening = ensureGatewayForAgent('cloud', 'default')
+    })
+    await flushAsync()
+    await opening
+
+    const registeredGateway = activeGateway()
+    expect(registeredGateway).not.toBeNull()
+    expect(isActivePrimary()).toBe(false)
+
+    act(() => connectionApplied?.())
+    await flushAsync()
+    await flushAsync()
+
+    // Applying the legacy Local/Cloud mode must not close an independent v2
+    // source. The foreground returns to the new primary, while the registered
+    // socket remains reusable and cannot arm ws_orphan_reap on the old backend.
+    expect(registeredGateway?.connectionState).toBe('open')
+    expect(isActivePrimary()).toBe(true)
   })
 
   it('re-fetches the profile rail from the NEW backend after a connection apply (#85731)', async () => {
