@@ -236,6 +236,7 @@ import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-pro
 import { registerPetOverlayIpc } from './pet-overlay-ipc'
 import {
   buildRegistryProfileRoutes,
+  isLocalEnumerationFailure,
   localRouteFallbackProfiles,
   registryGatewayWsUrl,
   undialedSshRouteSeeds
@@ -13129,7 +13130,12 @@ ipcMain.handle('hermes:plugin-profile-routes', async (_event, rawProfileNames) =
     : undefined
 
   const localFallbackProfiles = localSource
-    ? localRouteFallbackProfiles(agents, localSource.id, fallbackProfileNames, Boolean(localEnumeration?.error))
+    ? localRouteFallbackProfiles(
+        agents,
+        localSource.id,
+        fallbackProfileNames,
+        isLocalEnumerationFailure(localEnumeration?.error)
+      )
     : []
 
   if (localSource && localFallbackProfiles.length > 0) {
