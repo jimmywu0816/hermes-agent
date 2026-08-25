@@ -1,11 +1,12 @@
 """Gateway runtime-metadata footer (model · context % · cwd), off by default to keep replies
 minimal. Config: ``display.runtime_footer: {enabled: bool, fields: [model, context_pct, cwd]}``
 (order shown; drop any to hide), per-platform override ``display.platforms.<p>.runtime_footer``,
-toggled by ``/footer on|off``. Fields: ``model`` (vendor prefix dropped), ``context_pct`` (last-call
-occupancy), ``latency`` (turn wall-clock, opt-in — NOT in the default set so an unset ``fields``
-renders exactly as before), ``cwd`` (home-relative). ``gateway/run.py`` appends the footer to the
-final response only (never to tool-progress or streaming partials); when streaming already
-delivered the text, it goes out as a trailing message via ``send_trailing_footer()``."""
+toggled by ``/footer on|off``. Fields: ``provider`` (active model provider/backend), ``model``
+(vendor prefix dropped), ``context_pct`` (last-call occupancy), ``latency`` (turn wall-clock,
+opt-in — NOT in the default set so an unset ``fields`` renders exactly as before), ``cwd``
+(home-relative). ``gateway/run.py`` appends the footer to the final response only (never to
+tool-progress or streaming partials); when streaming already delivered the text, it goes out as
+a trailing message via ``send_trailing_footer()``."""
 
 from __future__ import annotations
 
@@ -71,7 +72,7 @@ def _format_latency(seconds: float) -> str:
     return f"{m}m{sec:02d}s"
 
 
-def format_runtime_footer(*, model: Optional[str], context_tokens: int,
+def format_runtime_footer(*, provider: Optional[str] = None, model: Optional[str], context_tokens: int,
                           context_length: Optional[int], cwd: Optional[str] = None,
                           turn_seconds: Optional[float] = None,
                           fields: Iterable[str] = _DEFAULT_FIELDS) -> str:
@@ -83,6 +84,7 @@ def format_runtime_footer(*, model: Optional[str], context_tokens: int,
         return ""
 
     renderers = {
+        "provider": lambda: str(provider or "").strip(),
         "model": lambda: _model_short(model),
         "context_pct": context_pct,
         # Skipped when the caller did not measure (None) or the value is negative.
@@ -93,7 +95,8 @@ def format_runtime_footer(*, model: Optional[str], context_tokens: int,
 
 
 def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str | None,
-                      model: Optional[str], context_tokens: int, context_length: Optional[int],
+                      provider: Optional[str] = None, model: Optional[str], context_tokens: int,
+                      context_length: Optional[int],
                       cwd: Optional[str] = None, turn_seconds: Optional[float] = None) -> str:
     """Entry point for gateway/run.py: footer text, or "" when disabled / no data. Callers append it
     to the final response themselves, preserving a single blank line of separation.
@@ -102,6 +105,6 @@ def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str |
     cfg = resolve_footer_config(user_config, platform_key)
     if not cfg.get("enabled"):
         return ""
-    return format_runtime_footer(model=model, context_tokens=context_tokens,
+    return format_runtime_footer(provider=provider, model=model, context_tokens=context_tokens,
                                  context_length=context_length, cwd=cwd, turn_seconds=turn_seconds,
                                  fields=cfg.get("fields") or _DEFAULT_FIELDS)
