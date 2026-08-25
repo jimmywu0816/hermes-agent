@@ -77,7 +77,7 @@ import {
 import { decideBootstrapRepair } from './bootstrap-repair-guard'
 import { runBootstrap } from './bootstrap-runner'
 import { detectBundleSkew } from './bundle-skew'
-import { applyConnectionChange } from './connection-apply'
+import { applyConnectionChange, teardownSshState } from './connection-apply'
 import {
   apiRequestRegistryConnectionId,
   authModeFromStatus,
@@ -9468,19 +9468,20 @@ async function teardownSshConnection(profile) {
 
   terminalIpc.disposeTerminalSessionsForSshScope(scope)
 
-  try {
-    if (state.localPort && state.remotePort) {
-      await state.ssh.cancelForward(state.localPort, state.remotePort)
+  // Kill the owned remote serve --isolated *before* closing the SSH
+  // transport. Spawn detaches with setsid/nohup, so closing the tunnel
+  // alone leaves the backend at pid 1 holding state.db (#91668).
+  // Windows remotes use a different lifecycle (connectWindowsRemote) and
+  // are left to a follow-up; POSIX is the leak that OOM'd gateways.
+  await teardownSshState(
+    {
+      ...state,
+      ownershipId: state.ownershipId || sshOwnershipKey(profile)
+    },
+    {
+      cleanupRemote: state.remotePlatform === 'Windows' ? async () => {} : remoteLifecycle.disconnect
     }
-  } catch {
-    // best effort
-  }
-
-  try {
-    await state.ssh.close()
-  } catch {
-    // best effort
-  }
+  )
 }
 
 // CRITICAL: this must mirror resolveRemoteBackend's precedence, not just return
@@ -9711,6 +9712,7 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
   sshConnections.set(scope, {
     ssh,
     fingerprint,
+    ownershipId: result.ownershipId || sshOwnershipKey(profile),
     localPort: result.localPort,
     remotePort: result.remotePort,
     pid: result.pid,
@@ -15906,6 +15908,12 @@ app.on('before-quit', event => {
     return
   }
 
+  // A prevented first quit leaves the renderer alive while teardown runs.
+  // Seal the SSH coordinator before touching connections so reconnect
+  // callbacks cannot recreate a backend for a registration whose app is
+  // already quitting (#91668).
+  sshBootstrapCoordinator.shutdown()
+
   if (!backendQuitTeardownDone) {
     event.preventDefault()
     void backendShutdown.run().finally(() => {
@@ -15916,7 +15924,6 @@ app.on('before-quit', event => {
 
   if ((sshConnections.size > 0 || sshBootstrapCoordinator.promises().length > 0) && !sshQuitTeardownDone) {
     event.preventDefault()
-    sshBootstrapCoordinator.cancelAll()
     const scopes = [...sshConnections.keys()]
 
     const pending = Promise.allSettled([
@@ -15924,7 +15931,10 @@ app.on('before-quit', event => {
       ...sshBootstrapCoordinator.promises()
     ])
 
-    void Promise.race([pending, new Promise(resolve => setTimeout(resolve, 4_000))]).then(async () => {
+    // cleanupStale waits up to 5s for the owned pid to exit (50 * 100ms).
+    // The previous 4s race could close SSH first and leave serve --isolated
+    // reparented to pid 1.
+    void Promise.race([pending, new Promise(resolve => setTimeout(resolve, 6_000))]).then(async () => {
       await sshBootstrapCoordinator.forceCleanupAll()
       sshQuitTeardownDone = true
       app.quit()
