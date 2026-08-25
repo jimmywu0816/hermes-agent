@@ -27,7 +27,6 @@ import { clearPreviewArtifacts } from '@/store/preview-status'
 import { clearAllPrompts } from '@/store/prompts'
 import {
   $busy,
-  $connection,
   $currentCwd,
   $messages,
   $terminalBackend,
@@ -37,7 +36,7 @@ import {
   setMessages,
   setTurnStartedAt
 } from '@/store/session'
-import { $sessionStates } from '@/store/session-states'
+import { $sessionStates, isSessionRemote } from '@/store/session-states'
 import { clearSessionSubagents } from '@/store/subagents'
 import { clearSessionTodos } from '@/store/todos'
 import { setSessionDraftingTool } from '@/store/tool-drafting'
@@ -340,8 +339,8 @@ export function usePromptActions({
       options: { updateComposerAttachments?: boolean } = {}
     ): Promise<{ attachments: ComposerAttachment[]; sessionId: string }> => {
       const updateComposerAttachments = options.updateComposerAttachments ?? true
-      const remote = $connection.get()?.mode === 'remote'
       const storedSessionId = selectedStoredSessionIdRef.current
+      const remote = isSessionRemote(storedSessionId ?? sessionId)
       let liveSessionId = sessionId
       const synced: ComposerAttachment[] = []
 
@@ -430,7 +429,7 @@ export function usePromptActions({
   // image.attach_bytes.
   const eagerlyUploadAttachment = useCallback(
     async (sessionId: string, attachment: ComposerAttachment) => {
-      const remote = $connection.get()?.mode === 'remote'
+      const remote = isSessionRemote(sessionId)
 
       setComposerAttachmentUploadState(attachment.id, 'uploading')
 
