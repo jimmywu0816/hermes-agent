@@ -100,9 +100,15 @@ export function requestForSessionProfile<T>(
     // changes the observed call shape for the many callers that never asked
     // for a deadline (the plugin host bridge in contrib/wiring is the only one
     // that does).
-    return timeoutMs === undefined && signal === undefined
-      ? ambientRequest<T>(method, params)
-      : ambientRequest<T>(method, params, timeoutMs, signal)
+    if (signal !== undefined) {
+      return ambientRequest<T>(method, params, timeoutMs, signal)
+    }
+
+    if (timeoutMs !== undefined) {
+      return ambientRequest<T>(method, params, timeoutMs)
+    }
+
+    return ambientRequest<T>(method, params)
   }
 
   return requestGatewayForProfile<T>(normKey(ownerProfile), method, params, timeoutMs, signal)
