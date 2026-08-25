@@ -9,9 +9,10 @@ Config (``~/.hermes/config.yaml``)::
     display:
       runtime_footer:
         enabled: true                       # off by default
-        fields: [model, context_pct, cwd]   # order shown; drop any to hide
+        fields: [provider, model, context_pct, cwd]  # order shown; drop any to hide
 
 Available fields:
+    provider     — active model provider/backend (``openrouter``)
     model        — bare model id, vendor prefix dropped (``gpt-5.4``)
     context_pct  — last-call context occupancy as a percent (``5%``)
     latency      — wall-clock duration of the turn (``22s``, ``1m05s``)
@@ -110,6 +111,7 @@ def _format_latency(seconds: float) -> str:
 
 def format_runtime_footer(
     *,
+    provider: Optional[str] = None,
     model: Optional[str],
     context_tokens: int,
     context_length: Optional[int],
@@ -124,7 +126,11 @@ def format_runtime_footer(
     """
     parts: list[str] = []
     for field in fields:
-        if field == "model":
+        if field == "provider":
+            value = str(provider or "").strip()
+            if value:
+                parts.append(value)
+        elif field == "model":
             m = _model_short(model)
             if m:
                 parts.append(m)
@@ -158,6 +164,7 @@ def build_footer_line(
     *,
     user_config: dict[str, Any] | None,
     platform_key: str | None,
+    provider: Optional[str] = None,
     model: Optional[str],
     context_tokens: int,
     context_length: Optional[int],
@@ -178,6 +185,7 @@ def build_footer_line(
     if not cfg.get("enabled"):
         return ""
     return format_runtime_footer(
+        provider=provider,
         model=model,
         context_tokens=context_tokens,
         context_length=context_length,

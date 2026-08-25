@@ -74,6 +74,68 @@ def test_format_footer_skips_missing_context_length():
     assert "/tmp/wd" in out
 
 
+def test_format_footer_provider_renders_in_configured_field_order():
+    out = format_runtime_footer(
+        provider="openrouter",
+        model="openrouter/openai/gpt-5.4",
+        context_tokens=68000,
+        context_length=100000,
+        fields=("provider", "model", "context_pct"),
+    )
+    assert out == "openrouter · gpt-5.4 · 68%"
+
+
+def test_format_footer_skips_missing_provider():
+    out = format_runtime_footer(
+        provider=None,
+        model="gpt-5.4",
+        context_tokens=0,
+        context_length=None,
+        fields=("provider", "model"),
+    )
+    assert out == "gpt-5.4"
+
+
+@pytest.mark.parametrize(
+    "provider_value,expected",
+    [
+        (None, "gpt-5.4"),
+        ("", "gpt-5.4"),
+        ("   ", "gpt-5.4"),
+        ("deepseek", "deepseek · gpt-5.4"),
+    ],
+)
+def test_format_footer_provider_empty_and_whitespace_skipped(provider_value, expected):
+    out = format_runtime_footer(
+        provider=provider_value,
+        model="gpt-5.4",
+        context_tokens=0,
+        context_length=None,
+        fields=("provider", "model"),
+    )
+    assert out == expected
+
+
+def test_build_footer_line_threads_provider():
+    out = build_footer_line(
+        user_config={
+            "display": {
+                "runtime_footer": {
+                    "enabled": True,
+                    "fields": ["provider", "model"],
+                }
+            }
+        },
+        platform_key="telegram",
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        context_tokens=0,
+        context_length=None,
+        cwd="",
+    )
+    assert out == "deepseek · deepseek-v4-flash"
+
+
 # ---------------------------------------------------------------------------
 # resolve_footer_config
 # ---------------------------------------------------------------------------
@@ -131,7 +193,6 @@ def test_build_footer_per_platform_off_suppresses():
         cwd="/tmp",
     )
     assert out == ""
-
 
 
 # ---------------------------------------------------------------------------

@@ -2059,7 +2059,7 @@ Notes:
 
 ### Runtime-metadata footer (gateway only)
 
-When `display.runtime_footer.enabled: true`, Hermes appends a small runtime-context footer to the **final** message of each gateway turn. The current footer can show the model, context-window percentage, and current working directory. Off by default; opt in per-gateway if your team wants every reply to include this provenance.
+When `display.runtime_footer.enabled: true`, Hermes appends a small runtime-context footer to the **final** message of each gateway turn. The footer can show the active provider, model, context-window percentage, and current working directory. Off by default; opt in per-gateway if your team wants every reply to include this provenance.
 
 ```yaml
 display:
@@ -2072,6 +2072,7 @@ Supported fields:
 
 | Field | Renders | Example |
 | --- | --- | --- |
+| `provider` | Active model provider/backend | `openrouter` |
 | `model` | Bare model id, vendor prefix dropped | `gpt-5.4` |
 | `context_pct` | Last-call context occupancy as a percent | `5%` |
 | `latency` | Wall-clock duration of the turn | `22s`, `1m05s` |
@@ -2080,6 +2081,9 @@ Supported fields:
 The default field set is `["model", "context_pct", "cwd"]`. `latency` is opt-in — add it to `fields` to use it. Fields whose data is unavailable are skipped silently rather than rendering an empty slot.
 
 The `/footer` slash command toggles this at runtime in any session.
+
+For provider provenance, add `provider` wherever you want it in the field order,
+for example `["provider", "model", "context_pct"]`.
 
 Example footer appended to a Telegram/Discord/Slack reply:
 
