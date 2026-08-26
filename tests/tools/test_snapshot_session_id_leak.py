@@ -27,6 +27,10 @@ from tools.environments.base import (
 )
 
 
+def _bash() -> str:
+    return "/bin/bash" if os.path.exists("/bin/bash") else "bash"
+
+
 # ---------------------------------------------------------------------------
 # Unit: the exclusion regex matches exactly the bridged vars, nothing else.
 # ---------------------------------------------------------------------------
@@ -62,6 +66,58 @@ def test_export_snippet_shape():
     assert snippet.lstrip().startswith("{ ")
     assert "|| true; }" in snippet
     assert snippet.rstrip().endswith('> "$__hermes_snap_tmp"')
+
+
+# ---------------------------------------------------------------------------
+# Credential scrub: env vars whose NAME contains credential markers
+# (KEY/TOKEN/SECRET/PASSWORD/PASSWD/CREDENTIAL, any case) must not land in
+# the snapshot dump.
+# ---------------------------------------------------------------------------
+
+def test_export_snippet_contains_case_insensitive_credential_scrub():
+    snippet = _export_dump_excluding_session_vars('"$__hermes_snap_tmp"')
+    # The loop uppercases each var name before the case match, so a single
+    # uppercase pattern set covers every casing variant.
+    assert "compgen -e" in snippet
+    assert "${__v^^}" in snippet
+    assert 'case "${__v^^}" in' in snippet
+    for marker in ("*KEY*", "*TOKEN*", "*SECRET*", "*PASSWORD*", "*PASSWD*", "*CREDENTIAL*"):
+        assert marker in snippet, f"{marker} should be in the scrub pattern"
+    # Lowercase-only patterns are gone: the case fold replaces them.
+    assert "*key*" not in snippet
+    assert "*password*" not in snippet
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX bash snapshot path")
+def test_export_snapshot_scrubs_credential_names_any_case(tmp_path):
+    import shlex
+    import subprocess
+
+    snap = tmp_path / "snap.sh"
+    dump = _export_dump_excluding_session_vars(shlex.quote(str(snap)))
+    q_snap = shlex.quote(str(snap))
+    script = "set -e\n"
+    script += "export db_password=leak1\n"
+    script += "export ApiKey=leak2\n"
+    script += "export MY_SECRET=leak3\n"
+    script += "export ACCESS_TOKEN=leak4\n"
+    script += "export normal_var=keepme\n"
+    script += "export APPLE=keepme\n"
+    script += dump + "\n"
+    script += "if grep -qE 'db_password|ApiKey|MY_SECRET|ACCESS_TOKEN' " + q_snap + "; then echo 'LEAKED_INTO_SNAPSHOT' >&2; exit 2; fi\n"
+    script += "source " + q_snap + "\n"
+    script += "if grep -qE 'db_password|ApiKey|MY_SECRET|ACCESS_TOKEN' " + q_snap + "; then echo 'LEAKED_INTO_SNAPSHOT' >&2; exit 2; fi\n"
+    script += "if ! grep -qE '^declare -x normal_var=' " + q_snap + "; then echo 'NORMAL_VAR_MISSING' >&2; exit 3; fi\n"
+    script += "if ! grep -qE '^declare -x APPLE=' " + q_snap + "; then echo 'APPLE_MISSING' >&2; exit 4; fi\n"
+    result = subprocess.run(
+        [_bash(), "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": os.environ.get("PATH", "")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
 
 
 # ---------------------------------------------------------------------------

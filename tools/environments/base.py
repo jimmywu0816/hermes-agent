@@ -600,11 +600,12 @@ def _export_dump_excluding_session_vars(
         # 2026-08-14 security fix: credential env vars must never land in
         # the /tmp snapshot (HINDSIGHT_API_LLM_API_KEY was leaked to
         # /tmp/hermes-snap-*.sh). Name-prefix unset cannot express this, so
-        # iterate: any var whose NAME contains KEY/TOKEN/SECRET/PASSWORD is
-        # dropped from the dump, same principle as the session vars above.
+        # iterate: any var whose NAME contains KEY/TOKEN/SECRET/PASSWORD/
+        # PASSWD/CREDENTIAL (case-insensitive, via ${__v^^}) is dropped from
+        # the dump, same principle as the session vars above.
         "for __v in $(compgen -e); do "
-        "case \"$__v\" in "
-        "*KEY*|*key*|*TOKEN*|*token*|*SECRET*|*secret*|*PASSWORD*|*passwd*|*PASSWD*|*credential*|*CREDENTIAL*) unset \"$__v\" 2>/dev/null;; "
+        "case \"${__v^^}\" in "
+        "*KEY*|*TOKEN*|*SECRET*|*PASSWORD*|*PASSWD*|*CREDENTIAL*) unset \"$__v\" 2>/dev/null;; "
         "esac; done; "
         "export -p; "
         ") || true; } "
