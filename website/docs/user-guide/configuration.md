@@ -2072,6 +2072,7 @@ Supported fields:
 
 | Field | Renders | Example |
 | --- | --- | --- |
+| `bot` | Active Hermes profile name (multi-bot fleets) | `finance` |
 | `provider` | Active model provider/backend | `openrouter` |
 | `model` | Bare model id, vendor prefix dropped | `gpt-5.4` |
 | `context_pct` | Last-call context occupancy as a percent | `5%` |
@@ -2084,6 +2085,20 @@ The `/footer` slash command toggles this at runtime in any session.
 
 For provider provenance, add `provider` wherever you want it in the field order,
 for example `["provider", "model", "context_pct"]`.
+
+The `bot` field shows the profile that served the turn (resolved from the
+source's profile context — `source.profile`, then profile routing, then the
+active profile). To display a custom label instead of the profile name, set
+`display.runtime_footer.bot_name` (a per-platform override is also honored
+under `display.platforms.<platform>.runtime_footer.bot_name`):
+
+```yaml
+display:
+  runtime_footer:
+    enabled: true
+    fields: ["bot", "provider", "model", "context_pct"]
+    bot_name: "Jimmy_Fin_bot"
+```
 
 Example footer appended to a Telegram/Discord/Slack reply:
 

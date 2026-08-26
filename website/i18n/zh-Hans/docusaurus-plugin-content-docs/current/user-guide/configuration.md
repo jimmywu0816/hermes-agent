@@ -1272,6 +1272,33 @@ display:
 将 `provider` 加入 `fields` 即可显示当前模型提供商，例如
 `["provider", "model", "context_pct"]`。
 
+支持的字段：
+
+| 字段 | 显示内容 | 示例 |
+| --- | --- | --- |
+| `bot` | 服务该轮次的 Hermes profile 名称（多 bot 环境） | `finance` |
+| `provider` | 当前模型提供商/后端 | `openrouter` |
+| `model` | 裸模型 ID（去掉厂商前缀） | `gpt-5.4` |
+| `context_pct` | 上次调用的上下文占用百分比 | `5%` |
+| `latency` | 本轮次墙钟耗时 | `22s`、`1m05s` |
+| `cwd` | 相对主目录的工作目录 | `~` |
+
+默认字段集为 `["model", "context_pct", "cwd"]`。`latency` 为可选字段——加入
+`fields` 即可启用。数据不可用的字段会被静默跳过，不会渲染空位。
+
+`bot` 字段显示服务该轮次的 profile（解析顺序：来源的 profile 上下文——
+`source.profile` → profile 路由 → 当前激活 profile）。如需显示自定义名称
+而非 profile 名，可设置 `display.runtime_footer.bot_name`（也支持
+`display.platforms.<platform>.runtime_footer.bot_name` 每平台覆盖）：
+
+```yaml
+display:
+  runtime_footer:
+    enabled: true
+    fields: ["bot", "provider", "model", "context_pct"]
+    bot_name: "Jimmy_Fin_bot"
+```
+
 `/footer` 斜杠命令在任何会话中运行时切换此功能。
 
 附加到 Telegram/Discord/Slack 回复的示例页脚：
