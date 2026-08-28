@@ -22,6 +22,10 @@ Available fields:
 ``latency`` is opt-in: it is NOT in the default field set, so a footer whose
 ``fields`` are unset renders exactly as before.
 
+``effort`` is opt-in the same way: it renders the active reasoning-effort
+level (``high``, ``max``, ``-`` when thinking is disabled, skipped entirely
+when no reasoning config is in effect).
+
 Per-platform overrides live under ``display.platforms.<platform>.runtime_footer``.
 Users can toggle the global setting with ``/footer on|off`` from both the CLI
 and any gateway platform.
@@ -123,6 +127,7 @@ def format_runtime_footer(
     cwd: Optional[str] = None,
     turn_seconds: Optional[float] = None,
     bot_name: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
     fields: Iterable[str] = _DEFAULT_FIELDS,
 ) -> str:
     """Render the footer line, or return "" if no fields have data.
@@ -149,6 +154,12 @@ def format_runtime_footer(
             # timing (call sites that don't measure) or the value is negative.
             if turn_seconds is not None and turn_seconds >= 0:
                 parts.append(_format_latency(turn_seconds))
+        elif field == "effort":
+            # Opt-in: active reasoning-effort level. Rendered as "-" when
+            # thinking is explicitly disabled, skipped when no reasoning
+            # config is in effect (caller uses the provider default).
+            if reasoning_effort:
+                parts.append(reasoning_effort)
         elif field == "cwd":
             try:
                 from tools.terminal_scope import terminal_env as _tenv
@@ -182,6 +193,7 @@ def build_footer_line(
     context_length: Optional[int],
     cwd: Optional[str] = None,
     turn_seconds: Optional[float] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """Top-level entry point used by gateway/run.py.
 
@@ -203,6 +215,7 @@ def build_footer_line(
         context_length=context_length,
         cwd=cwd,
         turn_seconds=turn_seconds,
+        reasoning_effort=reasoning_effort,
         bot_name=cfg.get("bot_name") or (profile or "").strip() or "default",
         fields=cfg.get("fields") or _DEFAULT_FIELDS,
     )
