@@ -23416,9 +23416,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _footer_line = ""
             try:
                 from gateway.runtime_footer import build_footer_line as _bfl
+                # Re-resolve the effort for THIS session at footer time instead
+                # of reading the shared self._reasoning_config slot: concurrent
+                # foreground/background turns overwrite that runner-level field
+                # mid-turn, so a footer built from it can show another turn's
+                # effort (Codex review d46a02fb8a, P2). Session-scoped
+                # resolution honors /reasoning overrides and per-model config
+                # without touching shared mutable state.
                 _reasoning_effort_label = ""
                 try:
-                    _rc = self._reasoning_config
+                    _rc = self._resolve_session_reasoning_config(
+                        source=source,
+                        model=str(agent_result.get("model") or ""),
+                    )
                 except Exception:
                     _rc = None
                 if isinstance(_rc, dict):
