@@ -1459,6 +1459,16 @@ class GatewayTurnMixin:
         from gateway.run import _load_gateway_config, _platform_config_key, _terminal_scope_cwd
         try:
             from gateway.runtime_footer import build_footer_line as _bfl
+            _reasoning_effort_label = ""
+            try:
+                _rc = self._reasoning_config
+            except Exception:
+                _rc = None
+            if isinstance(_rc, dict):
+                if _rc.get("enabled") is False:
+                    _reasoning_effort_label = "-"
+                else:
+                    _reasoning_effort_label = str(_rc.get("effort") or "").strip()
             return _bfl(
                 user_config=_load_gateway_config(),
                 platform_key=_platform_config_key(source.platform),
@@ -1468,6 +1478,7 @@ class GatewayTurnMixin:
                 context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                 context_length=agent_result.get("context_length") or None,
                 cwd=_terminal_scope_cwd(""), turn_seconds=_turn_seconds,
+                reasoning_effort=_reasoning_effort_label,
             )
         except Exception as _footer_err:
             logger.debug("runtime_footer build failed: %s", _footer_err)

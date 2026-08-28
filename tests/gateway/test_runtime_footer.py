@@ -421,3 +421,101 @@ def test_default_build_footer_line_ignores_turn_seconds(monkeypatch):
     with_timing = build_footer_line(**common, turn_seconds=125.0)
     assert baseline == "gpt-5.4 · 5% · /var/data"
     assert with_timing == baseline
+
+
+# ---------------------------------------------------------------------------
+# effort field — opt-in, never in _DEFAULT_FIELDS
+# ---------------------------------------------------------------------------
+
+
+def test_effort_not_in_default_fields():
+    from gateway.runtime_footer import _DEFAULT_FIELDS
+
+    assert "effort" not in _DEFAULT_FIELDS
+    assert list(_DEFAULT_FIELDS) == _LEGACY_DEFAULT_FIELDS
+
+
+@pytest.mark.parametrize(
+    "effort,expected",
+    [
+        ("high", "high"),
+        ("max", "max"),
+        ("xhigh", "xhigh"),
+        ("-", "-"),  # thinking explicitly disabled
+    ],
+)
+def test_format_footer_effort_renders(effort, expected):
+    out = format_runtime_footer(
+        model="zai/glm-5.3-flash",
+        context_tokens=0,
+        context_length=None,
+        reasoning_effort=effort,
+        fields=("model", "effort"),
+    )
+    assert out == f"glm-5.3-flash · {expected}"
+
+
+def test_format_footer_effort_skipped_when_unset():
+    """No reasoning config in effect → effort field silently skipped."""
+    out = format_runtime_footer(
+        model="zai/glm-5.3-flash",
+        context_tokens=0,
+        context_length=None,
+        reasoning_effort=None,
+        fields=("model", "effort"),
+    )
+    assert out == "glm-5.3-flash"
+
+
+def test_format_footer_effort_order_matches_config():
+    out = format_runtime_footer(
+        model="deepseek-v4-flash",
+        context_tokens=0,
+        context_length=None,
+        reasoning_effort="max",
+        fields=("effort", "model"),
+    )
+    assert out == "max · deepseek-v4-flash"
+
+
+def test_build_footer_line_threads_reasoning_effort(monkeypatch):
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    out = build_footer_line(
+        user_config={
+            "display": {
+                "runtime_footer": {
+                    "enabled": True,
+                    "fields": ["provider", "model", "effort", "context_pct"],
+                }
+            }
+        },
+        platform_key="telegram",
+        provider="zai",
+        model="zai/glm-5.3-flash",
+        context_tokens=4_600,
+        context_length=200_000,
+        cwd="",
+        reasoning_effort="high",
+    )
+    assert out == "zai · glm-5.3-flash · high · 2%"
+
+
+def test_build_footer_line_effort_defaults_to_blank(monkeypatch):
+    """Callers that don't pass reasoning_effort keep rendering (field skipped)."""
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    out = build_footer_line(
+        user_config={
+            "display": {
+                "runtime_footer": {
+                    "enabled": True,
+                    "fields": ["model", "effort"],
+                }
+            }
+        },
+        platform_key="discord",
+        model="openai/gpt-5.4",
+        context_tokens=0,
+        context_length=None,
+        cwd="",
+    )
+    assert out == "gpt-5.4"

@@ -5,9 +5,11 @@ toggled by ``/footer on|off``. Fields: ``provider`` (active model provider/backe
 (vendor prefix dropped), ``context_pct`` (last-call occupancy), ``latency`` (turn wall-clock,
 opt-in — NOT in the default set so an unset ``fields`` renders exactly as before), ``cwd``
 (home-relative), ``bot`` (active Hermes profile name, overridable via
-``display.runtime_footer.bot_name``). ``gateway/run.py`` appends the footer to the final response
-only (never to tool-progress or streaming partials); when streaming already delivered the text,
-it goes out as a trailing message via ``send_trailing_footer()``."""
+``display.runtime_footer.bot_name``), ``effort`` (active reasoning-effort level — renders ``-``
+when thinking is disabled, skipped when no reasoning config is in effect; opt-in the same way as
+``latency``). ``gateway/run.py`` appends the footer to the final response only (never to
+tool-progress or streaming partials); when streaming already delivered the text, it goes out as
+a trailing message via ``send_trailing_footer()``."""
 
 from __future__ import annotations
 
@@ -78,6 +80,7 @@ def _format_latency(seconds: float) -> str:
 def format_runtime_footer(*, provider: Optional[str] = None, model: Optional[str], context_tokens: int,
                           context_length: Optional[int], cwd: Optional[str] = None,
                           turn_seconds: Optional[float] = None, bot_name: Optional[str] = None,
+                          reasoning_effort: Optional[str] = None,
                           fields: Iterable[str] = _DEFAULT_FIELDS) -> str:
     """Render the footer line, or "" if no fields have data. Fields whose data is missing (and
     unknown field names) are skipped silently — a partial footer beats ``?%`` or empty slots."""
@@ -96,6 +99,10 @@ def format_runtime_footer(*, provider: Optional[str] = None, model: Optional[str
         # Local extension: active profile/bot name (auto-derived, or set
         # explicitly via display.runtime_footer.bot_name).
         "bot": lambda: bot_name or "",
+        # Opt-in: active reasoning-effort level. Rendered as "-" when
+        # thinking is explicitly disabled, skipped when no reasoning
+        # config is in effect (caller uses the provider default).
+        "effort": lambda: reasoning_effort or "",
     }
     return _SEP.join(v for field in fields if (render := renderers.get(field)) and (v := render()))
 
@@ -103,7 +110,8 @@ def format_runtime_footer(*, provider: Optional[str] = None, model: Optional[str
 def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str | None,
                       profile: Optional[str] = None, provider: Optional[str] = None,
                       model: Optional[str], context_tokens: int, context_length: Optional[int],
-                      cwd: Optional[str] = None, turn_seconds: Optional[float] = None) -> str:
+                      cwd: Optional[str] = None, turn_seconds: Optional[float] = None,
+                      reasoning_effort: Optional[str] = None) -> str:
     """Entry point for gateway/run.py: footer text, or "" when disabled / no data. Callers append it
     to the final response themselves, preserving a single blank line of separation.
     ``turn_seconds`` is the caller-measured (``time.monotonic()``) run duration; ``None`` skips the
@@ -113,5 +121,6 @@ def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str |
         return ""
     return format_runtime_footer(provider=provider, model=model, context_tokens=context_tokens,
                                  context_length=context_length, cwd=cwd, turn_seconds=turn_seconds,
+                                 reasoning_effort=reasoning_effort,
                                  bot_name=cfg.get("bot_name") or (profile or "").strip() or "default",
                                  fields=cfg.get("fields") or _DEFAULT_FIELDS)
