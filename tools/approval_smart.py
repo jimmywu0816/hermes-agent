@@ -125,21 +125,34 @@ def _smart_verdict(command: str, description: str, pattern_key: str,
                    pattern_keys: list[str], session_key: str) -> str:
     """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate'.
     Redaction is observer-payload preparation, not approval policy: if it fails,
-    skip observability rather than leak raw data or block the LLM decision."""
+    skip observability rather than leak raw data or block the LLM decision.
+
+    Jpyco fleet patch (P0-4, 2026-09-07, owner-approved): the guardian receives
+    the REDACTED command, never the raw text — commands routinely reference
+    .env/secrets paths, and the raw text was being shipped to a third-party
+    inference provider (terminal path AND the execute_code whole-script path).
+    """
     try:
         from agent.redact import redact_sensitive_text
+        redacted_command = redact_sensitive_text(command, force=True)
         payload = {
-            "command": redact_sensitive_text(command, force=True),
+            "command": redacted_command,
             "description": redact_sensitive_text(description, force=True),
             "pattern_key": pattern_key, "pattern_keys": list(pattern_keys),
             "session_key": session_key, "surface": "smart",
         }
     except Exception as exc:
         logger.debug("Smart approval hook redaction failed: %s", exc)
+        redacted_command = command
         payload = None
     else:
         _ctx._fire_approval_hook("pre_approval_request", **payload)
-    verdict = _smart_approve(command, description)
-    if payload is not None and verdict in {"approve", "deny"}:
+    verdict = _smart_approve(redacted_command, description)
+    # Jpyco fleet patch (P0-2, 2026-09-07, owner-approved): ESCALATE verdicts
+    # are ALSO recorded via the post hook (choice=smart_escalate) so that
+    # "guardian escalated everything" is an observable fact in the audit JSONL
+    # instead of an inference from missing records. Approval/deny behaviour is
+    # unchanged.
+    if payload is not None and verdict in {"approve", "deny", "escalate"}:
         _ctx._fire_approval_hook("post_approval_response", **payload, choice=f"smart_{verdict}", decided_by="aux_llm")
     return verdict
