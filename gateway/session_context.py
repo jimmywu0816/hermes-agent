@@ -92,6 +92,39 @@ def set_current_session_id(session_id: str) -> None:
     os.environ["HERMES_SESSION_ID"] = session_id
 
 
+_ORIGIN_ENV_VARS = ("HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_THREAD_ID")
+
+
+def set_current_session_origin(platform: str, chat_id: Any, thread_id: Any) -> None:
+    """Mirror the turn's routing origin into ``os.environ`` so tools that spawn outbound CLIs
+    (``hermes send``) inherit where "here" is and can refuse redundant self-targeted sends
+    (WO-D-2026-09-14-019-04 D).  In-process readers use the ContextVars via ``get_session_env``;
+    this os.environ mirror only serves the subprocess-inheritance path.  Delegated subagent
+    children (built in the parent process) get NO os.environ write, or they would clobber the
+    parent's origin (same precedent as :func:`set_current_session_id`)."""
+    if not platform or not chat_id:
+        return
+    try:
+        from agent.delegation_context import is_delegated_child_context
+        if is_delegated_child_context():
+            return
+    except Exception:
+        pass
+    os.environ["HERMES_SESSION_PLATFORM"] = str(platform)
+    os.environ["HERMES_SESSION_CHAT_ID"] = str(chat_id)
+    if thread_id:
+        os.environ["HERMES_SESSION_THREAD_ID"] = str(thread_id)
+    else:
+        os.environ.pop("HERMES_SESSION_THREAD_ID", None)
+
+
+def clear_current_session_origin() -> None:
+    """Drop the os.environ origin mirror at turn end so out-of-session subprocesses (e.g. a cron
+    job spawning ``hermes send``) never see a stale turn's origin."""
+    for name in _ORIGIN_ENV_VARS:
+        os.environ.pop(name, None)
+
+
 @contextmanager
 def scoped_current_session_id(session_id: str | None = None) -> Iterator[None]:
     """Bind a task-local session id and restore the prior value on exit; never touches
