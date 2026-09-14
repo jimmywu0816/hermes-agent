@@ -277,7 +277,10 @@ def _handle_send(args):
         if isinstance(result, dict) and result.get("success"):
             if used_home_channel:
                 result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
-            if mirror_text and _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
+            if not media_files and not result.get("skipped"):
+                from gateway.platforms.base import outbound_duplicate_record
+                outbound_duplicate_record(platform_name, chat_id, thread_id, cleaned_message)
+            if mirror_text and not result.get("skipped") and _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
                 result["mirrored"] = True
         if isinstance(result, dict) and "error" in result:
             result["error"] = _sanitize_error_text(result["error"])
@@ -722,6 +725,15 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     from gateway.config import Platform
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     media_files = media_files or []
+    # Outbound content-fingerprint dedup (WO-D-2026-09-14-019-04 B): THIS is the tool path's
+    # single funnel (every platform sender below bypasses _send_via_adapter), so the check and
+    # the post-success record live here/handler-level to cover Slack/Telegram/chunked alike.
+    from gateway.platforms.base import outbound_duplicate_check
+    if outbound_duplicate_check(platform_name, chat_id, thread_id, message):
+        return {"success": True, "skipped": True, "reason": "duplicate_content",
+                "note": ("Skipped send_message: identical content was already delivered to this "
+                         "target within the last 120 seconds (duplicate_content). Reword the "
+                         "message if a second copy is genuinely needed.")}
     if platform == Platform.WEIXIN:
         return await _send_weixin(pconfig, chat_id, message, media_files=media_files)
     # Telegram chunks internally on the *formatted* text (escaping inflates length).
