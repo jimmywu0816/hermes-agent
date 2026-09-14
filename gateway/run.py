@@ -4162,7 +4162,7 @@ class GatewayRunner(
         # True keeps CLI/unknown paths working; stateless adapters (api_server) declare False.
         _adapter = (getattr(self, "adapters", None) or {}).get(context.source.platform)
         _async_delivery = getattr(_adapter, "supports_async_delivery", True)
-        return set_session_vars(
+        tokens = set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
             chat_type=str(context.source.chat_type) if context.source.chat_type else "",
@@ -4178,11 +4178,19 @@ class GatewayRunner(
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
             cron_session="")
+        # Mirror the origin into os.environ so spawned CLIs (hermes send) can recognize
+        # self-targeted sends as redundant (WO-D-2026-09-14-019-04 D).
+        from gateway.session_context import set_current_session_origin
+        set_current_session_origin(
+            platform=context.source.platform.value, chat_id=context.source.chat_id,
+            thread_id=context.source.thread_id)
+        return tokens
 
     def _clear_session_env(self, tokens: list) -> None:
         """Restore session context variables to their pre-handler values."""
-        from gateway.session_context import clear_session_vars
+        from gateway.session_context import clear_current_session_origin, clear_session_vars
         clear_session_vars(tokens)
+        clear_current_session_origin()
 
     async def _run_in_executor_with_context(self, func, *args):
         """Run blocking work in the thread pool while preserving session contextvars."""
