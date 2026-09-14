@@ -52,21 +52,32 @@ def _read_message_body(positional: Optional[str], file_path: Optional[str]) -> O
     return (sys.stdin.read() or None) if not sys.stdin.isatty() else None
 
 
-def _emit_result(result_json: str, *, json_mode: bool, quiet: bool) -> int:
+def _emit_result(result_json: str, *, json_mode: bool, quiet: bool, channel_hint: str | None = None) -> int:
     """Print the ``send_message_tool`` JSON result in the requested format; return the exit code.
-    Unknown / unexpected shapes are failures so scripts notice."""
+    Unknown / unexpected shapes are failures so scripts notice. On success the receipt carries the
+    message id (``ts=``) and the resolved target (``channel=``) so the caller can self-verify
+    delivery instead of parsing a bare ``sent`` (WO-D-2026-09-14-019-04 C)."""
     try:
         payload = json.loads(result_json) if result_json else {}
     except json.JSONDecodeError:
         # Pass the raw string through so the user can still see what went wrong.
         payload = {"error": "invalid JSON from send_message_tool", "raw": result_json}
+    if channel_hint and isinstance(payload, dict) and "channel" not in payload:
+        payload = {**payload, "channel": channel_hint}
     if json_mode:
         print(json.dumps(payload, indent=2))
     elif not quiet:
         if payload.get("error"):
             print(f"hermes send: {payload['error']}", file=sys.stderr)
+        elif payload.get("skipped"):
+            print(payload.get("note") or f"skipped ({payload.get('reason') or 'unknown'})")
         elif payload.get("success"):
-            print(payload.get("note") or "sent")
+            receipt = "sent"
+            if payload.get("message_id"):
+                receipt += f" ts={payload['message_id']}"
+            if channel_hint:
+                receipt += f" channel={channel_hint}"
+            print(receipt)
         else:
             print(json.dumps(payload, indent=2))  # unknown shape — dump it, drop nothing
     if not payload.get("error") and (payload.get("skipped") or payload.get("success")):
@@ -212,7 +223,8 @@ def cmd_send(args: argparse.Namespace) -> None:
     # Routes to the platform adapter (bot-token path for built-ins, live-adapter path for plugin
     # platforms); takes the standard tool-call dict and returns a JSON string.
     result = send_message_tool({"action": "send", "target": target, "message": message})
-    sys.exit(_emit_result(result, json_mode=getattr(args, "json", False), quiet=getattr(args, "quiet", False)))
+    sys.exit(_emit_result(result, json_mode=getattr(args, "json", False), quiet=getattr(args, "quiet", False),
+                          channel_hint=target))
 
 
 # (flags, add_argument kwargs) in --help order.
