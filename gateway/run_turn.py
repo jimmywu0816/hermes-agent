@@ -3801,8 +3801,11 @@ class GatewayTurnMixin:
                 )
         elif _sc is not None:
             # DUPLICATE-RISK DIAGNOSTIC: a stream consumer existed but suppression did NOT fire; log the
-            # decision inputs ("signal never set" vs "ack-pending race").
-            logger.warning(
+            # decision inputs ("signal never set" vs "ack-pending race").  Deliberately DEBUG, not
+            # WARNING (WO-D-2026-09-14-019-04 E): under commentary configs this fired on every turn
+            # (zero signal), and commentary must not fold into suppression (#14238) — the real
+            # duplicate-content net is the outbound dedup gate + origin guard.
+            logger.debug(
                 "Normal final-send NOT suppressed despite active stream consumer for session %s: "
                 "streamed=%s previewed=%s content_delivered=%s transformed=%s final_len=%d — "
                 "possible duplicate send (see wecom ack-timeout RCA).",
