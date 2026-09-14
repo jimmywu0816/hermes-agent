@@ -239,6 +239,8 @@ def _handle_send(args):
             return tool_error(err)
     if duplicate_skip := _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id):
         return json.dumps(duplicate_skip)
+    if duplicate_skip := _maybe_skip_origin_duplicate_send(platform_name, chat_id, thread_id):
+        return json.dumps(duplicate_skip)
     # Slack: resolve user targets to DM channel IDs before sending. _parse_target_ref emits internal
     # ``user:U...`` / ``user_name:@handle`` targets; a bare U... id can also arrive from session metadata or
     # the home-channel config. All are opened via conversations.open (fixes #19236).
@@ -461,6 +463,29 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
                  "your final response instead, or use a different target if you want an additional message.")}
 
 
+def _maybe_skip_origin_duplicate_send(platform_name: str, chat_id: str | None, thread_id: str | None):
+    """Skip redundant sends to the session's own routing origin: the final response already
+    auto-delivers there (WO-D-2026-09-14-019-04 D, generalizing the cron guard to every origin).
+    The origin comes from the session ContextVars, falling back to os.environ so a ``hermes send``
+    subprocess — which inherits the gateway's exported origin — is covered too."""
+    if not chat_id:
+        return None
+    from gateway.session_context import get_session_env
+    origin_platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
+    origin_chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+    origin_thread = get_session_env("HERMES_SESSION_THREAD_ID", "").strip() or None
+    if not (origin_platform and origin_chat_id
+            and origin_platform == str(platform_name).strip().lower()
+            and origin_chat_id == str(chat_id)
+            and origin_thread == (str(thread_id) if thread_id is not None else None)):
+        return None
+    target_label = f"{platform_name}:{chat_id}" + (f":{thread_id}" if thread_id is not None else "")
+    return {"success": True, "skipped": True, "reason": "origin_auto_delivery_duplicate_target", "target": target_label,
+        "note": (f"Skipped send_message to {target_label}. This session's final response will already "
+                 "auto-deliver to that same origin target. Put the intended user-facing content in "
+                 "your final response instead, or use a different target if you want an additional message.")}
+
+
 def _bounded_send_error(detail, max_chars=900):
     """Bound untrusted adapter/plugin error detail returned by send_message."""
     text = str(detail or "send failed")
@@ -474,9 +499,15 @@ async def _send_live_adapter_media(adapter, chat_id, message, media_files, *, th
     caption, separate_text = _media_caption_split(message, media_files, max_caption_len=_DEFAULT_CAPTION_LIMIT)
     last_result = None
     if separate_text and separate_text.strip():
-        last_result = await adapter.send(chat_id=chat_id, content=separate_text, metadata=metadata)
-        if not last_result.success:
-            return {"error": f"Adapter send failed: {_bounded_send_error(last_result.error)}"}
+        from gateway.platforms.base import outbound_duplicate_check, outbound_duplicate_record
+        _dedup_platform = getattr(getattr(adapter, "platform", None), "value", None) or "unknown"
+        if outbound_duplicate_check(_dedup_platform, chat_id, thread_id, separate_text):
+            separate_text = ""  # duplicate text of a recent delivery — the media itself still goes out
+        else:
+            last_result = await adapter.send(chat_id=chat_id, content=separate_text, metadata=metadata)
+            if not last_result.success:
+                return {"error": f"Adapter send failed: {_bounded_send_error(last_result.error)}"}
+            outbound_duplicate_record(_dedup_platform, chat_id, thread_id, separate_text)
     from gateway.platforms.base import BasePlatformAdapter
     total = len(media_files)
     for index, descriptor in enumerate(media_files):
@@ -541,6 +572,12 @@ async def _send_via_adapter(platform, pconfig, chat_id, chunk, *, thread_id=None
                     adapter, chat_id, chunk, media_files, thread_id=thread_id, metadata=metadata,
                     force_document=force_document)
             else:
+                from gateway.platforms.base import outbound_duplicate_check
+                if outbound_duplicate_check(platform_name, chat_id, thread_id, chunk):
+                    return {"success": True, "skipped": True, "reason": "duplicate_content",
+                            "note": ("Skipped send_message: identical content was already delivered to "
+                                     "this target within the last 120 seconds (duplicate_content). "
+                                     "Reword the message if a second copy is genuinely needed.")}
                 make_coro = lambda: adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)  # noqa: E731
             result = await _dispatch_on_gateway_loop(
                 runner, make_coro, f"send_message: failed to schedule{' media send' if media_files else ''} on gateway loop")
@@ -551,6 +588,9 @@ async def _send_via_adapter(platform, pconfig, chat_id, chunk, *, thread_id=None
         if isinstance(result, dict):
             return result
         if result.success:
+            if not media_files:
+                from gateway.platforms.base import outbound_duplicate_record
+                outbound_duplicate_record(platform_name, chat_id, thread_id, chunk)
             return {"success": True, "message_id": result.message_id}
         return {"error": f"Adapter send failed: {_bounded_send_error(result.error)}"}
     try:
