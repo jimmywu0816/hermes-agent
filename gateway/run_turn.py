@@ -3901,7 +3901,11 @@ class GatewayTurnMixin:
             # the decision inputs ("signal never set" vs "ack-pending race"). Skipped for consumers
             # never fed the final's deltas (interim-only wiring, #105341) — they cannot have raced
             # the normal final send, so the warning would be a guaranteed false positive.
-            logger.warning(
+            # Deliberately DEBUG, not WARNING (WO-D-2026-09-14-019-04 E): under commentary configs
+            # this fired on every turn (zero signal), and commentary must not fold into suppression
+            # (#14238) — the real duplicate-content net is the outbound dedup gate + origin guard;
+            # the diagnostic stays available at debug level for the wecom RCA path.
+            logger.debug(
                 "Normal final-send NOT suppressed despite active stream consumer for session %s: "
                 "streamed=%s previewed=%s content_delivered=%s transformed=%s final_len=%d — "
                 "possible duplicate send (see wecom ack-timeout RCA).",
