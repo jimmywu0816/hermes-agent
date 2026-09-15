@@ -1661,7 +1661,12 @@ class _OutboundDedupGate:
 
     @staticmethod
     def _default_store_path() -> Any:
-        # profile-aware: gateway and the CLIs it spawns share HERMES_HOME, so they share the store
+        # Per-HERMES_HOME, not fleet-wide (D-2026-09-15-012 案B): the gateway and the CLIs
+        # it spawns share the default home's store, but a profile-session CLI resolves
+        # HERMES_HOME to the profile dir and records there — fingerprints do not cross
+        # homes. Accepted residual window: a session-env-less send repeating within 120s
+        # (same content+target) across processes; in-process sends are covered by the
+        # origin guard.
         return _HERMES_HOME / "cache" / "outbound-dedup.json"
 
     @staticmethod
