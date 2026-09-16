@@ -212,8 +212,11 @@ def _smart_verdict(command: str, description: str, pattern_key: str,
     try:
         from agent.redact import redact_sensitive_text
         payload = {
-            "command": redact_sensitive_text(command, force=True),
-            "description": redact_sensitive_text(description, force=True),
+            # F3 (WO-D-2026-09-16-003-02): the observer/audit payload is a stored
+            # artifact, not just an egress surface — strict URL credentials are
+            # masked here too so ``user:pass@`` userinfo never lands in audit JSONL.
+            "command": redact_sensitive_text(command, force=True, redact_url_credentials=True),
+            "description": redact_sensitive_text(description, force=True, redact_url_credentials=True),
             "pattern_key": pattern_key, "pattern_keys": list(pattern_keys),
             "session_key": session_key, "surface": "smart",
         }
