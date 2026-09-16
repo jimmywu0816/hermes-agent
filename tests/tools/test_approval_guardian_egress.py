@@ -197,3 +197,21 @@ def test_bare_pass_guard_keeps_benign_mentions_untouched():
     assert "<secret-file:.env.example>" in out
     assert "as template for <secret-file:.env>" in out
     assert "<secret-file:<secret-file:" not in out
+
+
+# ---------------------------------------------------------------------------
+# F3 (WO-D-2026-09-16-003-02): observer/audit payload masks URL credentials.
+# ---------------------------------------------------------------------------
+
+def test_observer_payload_masks_url_password(monkeypatch):
+    hooks = []
+    monkeypatch.setattr(_ctx, "_fire_approval_hook",
+                        lambda name, **kwargs: hooks.append((name, kwargs)))
+    monkeypatch.setattr("agent.auxiliary_client.call_llm", _fake_llm([], "APPROVE"))
+    approval_smart._smart_verdict(
+        f"curl https://alice:{DUMMY_MIXED}@example.test/path", "fetch config",
+        "k", ["k"], "sess")
+    assert hooks, "pre_approval_request never fired"
+    pre = dict(hooks[0][1])
+    assert DUMMY_MIXED not in pre["command"]
+    assert "alice" in pre["command"]  # username (not a secret) stays visible
