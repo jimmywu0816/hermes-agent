@@ -244,7 +244,10 @@ class TestSmartModeFiresHooks:
         self._configure(monkeypatch, "approve")
         force_values = []
 
-        def redact(text, *, force=False):
+        def redact(text, *, force=False, **kwargs):
+            # F3 (WO-D-2026-09-16-003-02): the payload call now also passes
+            # redact_url_credentials=True — accepted and ignored here; the
+            # contract under test (force=True reaching the redactor) is unchanged.
             force_values.append(force)
             return f"redacted:{text}"
 
