@@ -171,3 +171,29 @@ def test_approve_verdict_recorded_in_audit(monkeypatch):
 ])
 def test_name_has_secret_word(name, expected):
     assert approval_smart._name_has_secret_word(name) is expected
+
+
+# ---------------------------------------------------------------------------
+# F2 (WO-D-2026-09-16-003-02): placeholder stays single-layer — the bare pass
+# must skip names already inside a `<secret-file:…>` placeholder.
+# ---------------------------------------------------------------------------
+
+def test_secret_file_placeholder_single_layer():
+    out = approval_smart._guardian_egress_redact("cat /srv/app/.env && deploy")
+    assert out == "cat <secret-file:.env> && deploy"
+    assert "<secret-file:<secret-file:" not in out
+
+
+def test_bare_name_alone_still_wraps_single_layer():
+    out = approval_smart._guardian_egress_redact("source .env && run")
+    assert out == "source <secret-file:.env> && run"
+    assert "<secret-file:<secret-file:" not in out
+
+
+def test_bare_pass_guard_keeps_benign_mentions_untouched():
+    # The lookbehind only suppresses re-wrapping inside placeholders; the
+    # conservative wrapping SCOPE (.env.example included) is unchanged by F2.
+    out = approval_smart._guardian_egress_redact("use the .env.example as template for .env")
+    assert "<secret-file:.env.example>" in out
+    assert "as template for <secret-file:.env>" in out
+    assert "<secret-file:<secret-file:" not in out
