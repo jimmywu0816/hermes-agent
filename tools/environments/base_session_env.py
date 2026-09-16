@@ -59,6 +59,10 @@ def _export_dump_excluding_session_vars(tmp_path: str, excluded_names: Iterable[
     ``curl … | bash #`` smuggled into a Matrix room/display name via ``HERMES_SESSION_CHAT_NAME``) land in
     the snapshot and execute on the next ``source`` (issue #71296). Unsetting first means ``export -p``
     never emits those vars — including any continuation lines.
+
+    Credentials are also scrubbed by NAME before ``export -p`` (bash 3.2-compatible,
+    IFS-independent, word-boundary matching; readonly exported vars handled via
+    ``export -n``): see the inline comment on the scrub snippet.
     """
     # ${!PREFIX*} is bash 3.2+ name-prefix expansion; empty matches are ignored
     # under 2>/dev/null. Caller names are quoted so malformed config can never
@@ -77,6 +81,23 @@ def _export_dump_excluding_session_vars(tmp_path: str, excluded_names: Iterable[
         # later ``source`` and fence the PARENT session's kanban CLI (#90782).
         "HERMES_DELEGATED_CHILD_CONTEXT HERMES_CRON_SESSION "
         f"HERMES_UI_SESSION_ID{extra_unset} 2>/dev/null; "
+        # Credential-name scrub BEFORE ``export -p`` (issue: the caller's env
+        # may carry API keys/tokens into /tmp/hermes-snap-*.sh): any exported
+        # var whose NAME contains key/token/secret/password/passwd/credential
+        # as an underscore-delimited word (or a camelCase suffix, e.g.
+        # ``ApiKey`` via the ``*key_`` tail) is un-exported from the dump.
+        # ``shopt -s nocasematch`` (bash 3.1+) replaces ``${__v^^}`` (bash 4.0+
+        # only, breaks macOS bash 3.2); ``export -n`` replaces ``unset`` so
+        # readonly exported credentials are scrubbed too; word boundaries keep
+        # benign names (TOKENIZERS_PARALLELISM) in the dump. The name list is
+        # consumed with ``while IFS= read -r``, NOT ``for $(compgen -e)``:
+        # under a non-whitespace IFS (e.g. ``IFS=:``) the for-loop sees ONE
+        # word, the case match never fires, and every credential leaks.
+        "shopt -s nocasematch; "
+        "while IFS= read -r __v; do "
+        "case \"_${__v}_\" in "
+        "*_key_*|*_token_*|*_secret_*|*_password_*|*_passwd_*|*_credential_*|*key_|*token_|*secret_|*password_|*passwd_|*credential_) export -n \"$__v\" 2>/dev/null;; "
+        "esac; done <<< \"$(compgen -e)\"; "
         "export -p; ) || true; } "
         f"> {tmp_path}")
 
