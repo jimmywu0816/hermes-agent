@@ -1148,8 +1148,17 @@ def _run_foreground(
             return _error_json(_redact_terminal_error_text(f"Command execution failed: {type(e).__name__}: {e}"))
 
     if result.get("yielded_session_id"):
+        partial = result.get("output", "") or ""
+        # T3 (WO-D-2026-09-16-003-01): the yielded partial output previously
+        # bypassed finalize_foreground_result and shipped RAW to the model —
+        # secrets printed before the yield survived unredacted (independent
+        # review 2026-09-16). Apply the same terminal-output redaction as the
+        # foreground path (command-aware env-dump pass included).
+        from agent.redact import redact_terminal_output
+        from tools.ansi_strip import strip_ansi
+        partial = redact_terminal_output(strip_ansi(partial).strip(), command) if partial else ""
         return json.dumps({
-            "output": result.get("output", ""), "exit_code": None, "error": None,
+            "output": partial, "exit_code": None, "error": None,
             "status": "yielded_to_background", "session_id": result["yielded_session_id"],
             "pid": result.get("pid"), "notify_on_complete": True, "note": _YIELDED_NOTE,
         }, ensure_ascii=False)
