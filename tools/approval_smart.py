@@ -96,8 +96,11 @@ _SECRET_FILE_PATH_RE = re.compile(
     r"(?![\w@+-])"
 )
 # Bare (relative/cwd) names with high enough secret-bearing confidence that
-# masking cannot break a legitimate workflow mention.
-_SECRET_FILE_BARE_RE = re.compile(r"(?<![\w.@/-])(\.env(?:\.[\w-]+)*|\.netrc)(?![\w@+-])")
+# masking cannot break a legitimate workflow mention. The ``secret-file:``
+# lookbehind keeps the bare pass from double-wrapping names already inside a
+# placeholder produced by the absolute-path pass (qa observation 1, WO-D-2026-
+# 09-16-003-02 F2): ``cat <secret-file:.env>`` stays single-layer.
+_SECRET_FILE_BARE_RE = re.compile(r"(?<!secret-file:)(?<![\w.@/-])(\.env(?:\.[\w-]+)*|\.netrc)(?![\w@+-])")
 
 # Underscore/hyphen boundary check — ``MAX_TOKENS`` (TOKENS with a trailing S)
 # and ``KEYBOARD``/``TOKENIZERS_PARALLELISM`` stay untouched, mirroring the
