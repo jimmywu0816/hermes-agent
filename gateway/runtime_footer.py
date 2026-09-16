@@ -1,11 +1,13 @@
-"""Gateway runtime-metadata footer (model · context % · cwd), off by default to keep replies
+"""Gateway runtime-metadata footer (bot · provider · model · effort · context % · cwd), off by default to keep replies
 minimal. Config: ``display.runtime_footer: {enabled: bool, fields: [model, context_pct, cwd]}``
 (order shown; drop any to hide), per-platform override ``display.platforms.<p>.runtime_footer``,
-toggled by ``/footer on|off``. Fields: ``model`` (vendor prefix dropped), ``context_pct`` (last-call
-occupancy), ``latency`` (turn wall-clock, opt-in — NOT in the default set so an unset ``fields``
-renders exactly as before), ``cwd`` (home-relative). ``gateway/run.py`` appends the footer to the
-final response only (never to tool-progress or streaming partials); when streaming already
-delivered the text, it goes out as a trailing message via ``send_trailing_footer()``."""
+toggled by ``/footer on|off``. Fields: ``bot`` (active profile name, opt-in), ``provider`` (backend
+that served the turn, opt-in), ``model`` (vendor prefix dropped), ``effort`` (active reasoning
+effort, opt-in), ``context_pct`` (last-call occupancy), ``latency`` (turn wall-clock, opt-in — NOT
+in the default set so an unset ``fields`` renders exactly as before), ``cwd`` (home-relative).
+``gateway/run.py`` appends the footer to the final response only (never to tool-progress or
+streaming partials); when streaming already delivered the text, it goes out as a trailing message
+via ``send_trailing_footer()``."""
 
 from __future__ import annotations
 
@@ -46,7 +48,7 @@ def _env_cwd() -> str:
 def resolve_footer_config(user_config: dict[str, Any] | None, platform_key: str | None = None) -> dict[str, Any]:
     """Resolve effective footer config: defaults (enabled=False) <
     ``display.runtime_footer`` < ``display.platforms.<platform_key>.runtime_footer``."""
-    resolved = {"enabled": False, "fields": list(_DEFAULT_FIELDS)}
+    resolved = {"enabled": False, "fields": list(_DEFAULT_FIELDS), "bot_name": ""}
     cfg = (user_config or {}).get("display") or {}
     plat_cfg = (cfg.get("platforms") or {}).get(platform_key) if platform_key else None
     sections = [cfg.get("runtime_footer"), plat_cfg.get("runtime_footer") if isinstance(plat_cfg, dict) else None]
@@ -57,6 +59,9 @@ def resolve_footer_config(user_config: dict[str, Any] | None, platform_key: str 
             resolved["enabled"] = bool(section.get("enabled"))
         if isinstance(section.get("fields"), list) and section["fields"]:
             resolved["fields"] = [str(f) for f in section["fields"]]
+        # ``bot_name`` overrides the resolved profile label for the ``bot`` field.
+        if isinstance(section.get("bot_name"), str) and section["bot_name"]:
+            resolved["bot_name"] = section["bot_name"]
     return resolved
 
 
@@ -71,7 +76,9 @@ def _format_latency(seconds: float) -> str:
     return f"{m}m{sec:02d}s"
 
 
-def format_runtime_footer(*, model: Optional[str], context_tokens: int,
+def format_runtime_footer(*, provider: Optional[str] = None,
+                          reasoning_effort: Optional[str] = None, bot: Optional[str] = None,
+                          model: Optional[str], context_tokens: int,
                           context_length: Optional[int], cwd: Optional[str] = None,
                           turn_seconds: Optional[float] = None,
                           fields: Iterable[str] = _DEFAULT_FIELDS) -> str:
@@ -83,8 +90,15 @@ def format_runtime_footer(*, model: Optional[str], context_tokens: int,
         return ""
 
     renderers = {
+        # Opt-in provenance fields (WO-D-2026-09-16-003-01 T5–T7): never in
+        # _DEFAULT_FIELDS, so an unset ``fields`` renders byte-stably as before.
+        "bot": lambda: str(bot or "").strip(),
+        "provider": lambda: str(provider or "").strip(),
         "model": lambda: _model_short(model),
         "context_pct": context_pct,
+        # Rendered as "-" when thinking is explicitly disabled (the caller passes
+        # "-"); skipped when no reasoning config is in effect (empty string).
+        "effort": lambda: str(reasoning_effort or "").strip(),
         # Skipped when the caller did not measure (None) or the value is negative.
         "latency": lambda: _format_latency(turn_seconds) if turn_seconds is not None and turn_seconds >= 0 else "",
         "cwd": lambda: _home_relative_cwd(cwd or _env_cwd()),
@@ -93,15 +107,20 @@ def format_runtime_footer(*, model: Optional[str], context_tokens: int,
 
 
 def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str | None,
+                      provider: Optional[str] = None, reasoning_effort: Optional[str] = None,
+                      profile: Optional[str] = None,
                       model: Optional[str], context_tokens: int, context_length: Optional[int],
                       cwd: Optional[str] = None, turn_seconds: Optional[float] = None) -> str:
     """Entry point for gateway/run.py: footer text, or "" when disabled / no data. Callers append it
     to the final response themselves, preserving a single blank line of separation.
     ``turn_seconds`` is the caller-measured (``time.monotonic()``) run duration; ``None`` skips the
-    ``latency`` field."""
+    ``latency`` field. ``profile`` feeds the ``bot`` field (with ``bot_name`` config override);
+    ``reasoning_effort`` is the caller-resolved THIS-turn reasoning effort."""
     cfg = resolve_footer_config(user_config, platform_key)
     if not cfg.get("enabled"):
         return ""
-    return format_runtime_footer(model=model, context_tokens=context_tokens,
+    return format_runtime_footer(provider=provider, reasoning_effort=reasoning_effort,
+                                 bot=cfg.get("bot_name") or profile,
+                                 model=model, context_tokens=context_tokens,
                                  context_length=context_length, cwd=cwd, turn_seconds=turn_seconds,
                                  fields=cfg.get("fields") or _DEFAULT_FIELDS)

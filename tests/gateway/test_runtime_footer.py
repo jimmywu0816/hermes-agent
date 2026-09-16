@@ -317,3 +317,80 @@ def test_default_build_footer_line_ignores_turn_seconds(monkeypatch):
     with_timing = build_footer_line(**common, turn_seconds=125.0)
     assert baseline == "gpt-5.4 · 5% · /var/data"
     assert with_timing == baseline
+
+
+# ---------------------------------------------------------------------------
+# Opt-in provenance fields: bot / provider / effort (T5–T7, WO-D-2026-09-16-003-01)
+# ---------------------------------------------------------------------------
+
+def test_format_footer_five_column_renders_in_configured_order():
+    out = format_runtime_footer(
+        bot="it", provider="openrouter", reasoning_effort="max",
+        model="openrouter/z-ai/glm-5.3", context_tokens=68000, context_length=100000,
+        fields=("bot", "provider", "model", "effort", "context_pct"),
+    )
+    assert out == "it · openrouter · glm-5.3 · max · 68%"
+
+
+def test_provenance_fields_never_in_default_fields():
+    # Even with values supplied, an unset ``fields`` (the default set) renders
+    # byte-stably as before — the new fields are opt-in only.
+    monkeyless = format_runtime_footer(
+        bot="it", provider="openrouter", reasoning_effort="max",
+        model="openai/gpt-5.4", context_tokens=68000, context_length=100000,
+    )
+    assert monkeyless == "gpt-5.4 · 68%"
+    assert resolve_footer_config({})["fields"] == ["model", "context_pct", "cwd"]
+
+
+@pytest.mark.parametrize("provider", [None, "", "   "])
+def test_provider_missing_or_empty_skipped(provider):
+    out = format_runtime_footer(
+        provider=provider, model="openai/gpt-5.4", context_tokens=68000,
+        context_length=100000, fields=("provider", "model", "context_pct"),
+    )
+    assert out == "gpt-5.4 · 68%"
+
+
+def test_effort_renders_dash_when_disabled_and_skips_when_unset():
+    assert "-" in format_runtime_footer(
+        reasoning_effort="-", model="m", context_tokens=1, context_length=10,
+        fields=("effort",),
+    )
+    for unset in (None, "", "  "):
+        assert format_runtime_footer(
+            reasoning_effort=unset, model="m", context_tokens=1, context_length=10,
+            fields=("effort", "model"),
+        ) == "m"
+
+
+def test_build_footer_line_bot_name_override_wins():
+    out = build_footer_line(
+        user_config={"display": {"runtime_footer": {"enabled": True, "fields": ["bot"],
+                                                    "bot_name": "custom-label"}}},
+        platform_key="slack", profile="resolved-profile", provider="openrouter",
+        model="openai/gpt-5.4", context_tokens=68000, context_length=100000,
+    )
+    assert out == "custom-label"
+
+
+def test_build_footer_line_profile_passthrough_and_effort():
+    out = build_footer_line(
+        user_config={"display": {"runtime_footer": {
+            "enabled": True, "fields": ["bot", "provider", "model", "effort"]}}},
+        platform_key="slack", profile="finance", provider="openrouter",
+        reasoning_effort="high", model="openai/gpt-5.4",
+        context_tokens=68000, context_length=100000,
+    )
+    assert out == "finance · openrouter · gpt-5.4 · high"
+
+
+def test_build_footer_line_defaults_byte_stable_with_new_kwargs():
+    # Passing the new kwargs while ``fields`` stays default changes nothing.
+    out = build_footer_line(
+        user_config={"display": {"runtime_footer": {"enabled": True}}},
+        platform_key="discord", profile="it", provider="openrouter",
+        reasoning_effort="max", model="openai/gpt-5.4",
+        context_tokens=50_247, context_length=1_000_000, cwd="/var/data",
+    )
+    assert out == "gpt-5.4 · 5% · /var/data"
