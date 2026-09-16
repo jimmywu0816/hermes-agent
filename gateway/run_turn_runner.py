@@ -1919,11 +1919,26 @@ class TurnRunner:
         agent = ctx.agent_holder[0]
         has_comp = bool(agent) and hasattr(agent, "context_compressor")
         comp = agent.context_compressor if has_comp else None
+        # T5/T6 (WO-D-2026-09-16-003-01): per-turn provenance for the footer.
+        # ``provider`` comes off the same live agent instance as ``model`` (fallback
+        # switches update agent.provider in place, so it reflects the backend that
+        # actually served the turn). ``effort`` comes from the THIS-turn local
+        # ``reasoning_config`` resolved above — NOT the shared runner slot, which
+        # concurrent foreground/background turns overwrite mid-turn; no re-resolve
+        # at footer time either. "-" means thinking is explicitly disabled.
+        _effort_label = ""
+        if isinstance(reasoning_config, dict):
+            if reasoning_config.get("enabled") is False:
+                _effort_label = "-"
+            else:
+                _effort_label = str(reasoning_config.get("effort") or "").strip()
         usage = {
             "last_prompt_tokens": getattr(comp, "last_prompt_tokens", 0) if has_comp else 0,
             "input_tokens": getattr(agent, "session_prompt_tokens", 0) if has_comp else 0,
             "output_tokens": getattr(agent, "session_completion_tokens", 0) if has_comp else 0,
             "model": getattr(agent, "model", None) if agent else None,
+            "provider": getattr(agent, "provider", None) if agent else None,
+            "effort": _effort_label or None,
             "context_length": (getattr(comp, "context_length", 0) or 0) if has_comp else 0,
         }
         compacted_in_place, effective_session_id, history_offset = self._sync_session_after_run(agent_history)

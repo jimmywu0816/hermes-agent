@@ -2177,25 +2177,29 @@ Notes:
 
 ### Runtime-metadata footer (gateway only)
 
-When `display.runtime_footer.enabled: true`, Hermes appends a small runtime-context footer to the **final** message of each gateway turn. The current footer can show the model, context-window percentage, and current working directory. Off by default; opt in per-gateway if your team wants every reply to include this provenance.
+When `display.runtime_footer.enabled: true`, Hermes appends a small runtime-context footer to the **final** message of each gateway turn. The footer can show the serving profile, the provider that actually served the turn, the model, the active reasoning effort, the context-window percentage, and the current working directory. Off by default; opt in per-gateway if your team wants every reply to include this provenance.
 
 ```yaml
 display:
   runtime_footer:
     enabled: true
-    fields: ["model", "context_pct", "cwd"]   # order shown; drop any to hide
+    fields: ["bot", "provider", "model", "effort", "context_pct"]   # order shown; drop any to hide
+    bot_name: my-custom-name            # optional: overrides the resolved profile name in the `bot` field
 ```
 
 Supported fields:
 
 | Field | Renders | Example |
 | --- | --- | --- |
+| `bot` | Serving Hermes profile name (opt-in); `display.runtime_footer.bot_name` overrides | `it` |
+| `provider` | Backend that served the turn (opt-in; reflects live fallback switches) | `openrouter` |
 | `model` | Bare model id, vendor prefix dropped | `gpt-5.4` |
+| `effort` | Active reasoning-effort level (opt-in); `-` when thinking is explicitly disabled, skipped when no reasoning config is in effect | `max`, `-` |
 | `context_pct` | Last-call context occupancy as a percent | `5%` |
 | `latency` | Wall-clock duration of the turn | `22s`, `1m05s` |
 | `cwd` | Home-relative working directory | `~` |
 
-The default field set is `["model", "context_pct", "cwd"]`. `latency` is opt-in — add it to `fields` to use it. Fields whose data is unavailable are skipped silently rather than rendering an empty slot.
+The default field set is `["model", "context_pct", "cwd"]`. `bot`, `provider`, `effort`, and `latency` are opt-in — add them to `fields` to use them. Fields whose data is unavailable are skipped silently rather than rendering an empty slot.
 
 The `/footer` slash command toggles this at runtime in any session.
 
