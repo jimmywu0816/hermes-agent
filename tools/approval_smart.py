@@ -9,6 +9,7 @@ Inspired by OpenAI Codex's Smart Approvals guardian subagent.
 """
 
 import logging
+import re
 import time
 from tools import approval_context as _ctx
 
@@ -71,6 +72,82 @@ def _get_smart_policy() -> str:
     return policy.strip() if isinstance(policy, str) else ""
 
 
+# ---------------------------------------------------------------------------
+# Guardian egress redaction (T2, WO-D-2026-09-16-003-01): the guardian LLM is a
+# third-party inference call, so its prompt is an egress boundary — the command
+# and description are redacted before it, fail-closed (a redactor failure NEVER
+# falls back to raw text; the placeholder makes the guardian escalate instead of
+# assessing raw secrets). Semantic re-port of carried 0010, hardened per the
+# 2026-09-16 independent review: strict URL credentials (``user:pass@`` was
+# passing through ``force=True`` alone), secret-file path normalization that
+# preserves the operation's semantics, and quoted/multiline assignment values
+# the upstream assignment pass misses.
+# ---------------------------------------------------------------------------
+
+# Absolute secret-file paths → ``<secret-file:basename>``: the guardian still
+# sees WHAT is being opened (enough to judge risk), not WHERE it lives.
+_SECRET_FILE_PATH_RE = re.compile(
+    r"(?<![\w.@+-])(?:/[\w.@+-]+)+/"
+    r"(?P<base>[.\w-]*credentials?(?:\.\w+)*"
+    r"|\.env(?:\.[\w-]+)*"
+    r"|id_rsa(?:\.\w+)?|id_ed25519(?:\.\w+)?|id_ecdsa(?:\.\w+)?"
+    r"|\.netrc"
+    r"|secrets?(?:/\w+)?)"
+    r"(?![\w@+-])"
+)
+# Bare (relative/cwd) names with high enough secret-bearing confidence that
+# masking cannot break a legitimate workflow mention.
+_SECRET_FILE_BARE_RE = re.compile(r"(?<![\w.@/-])(\.env(?:\.[\w-]+)*|\.netrc)(?![\w@+-])")
+
+# Underscore/hyphen boundary check — ``MAX_TOKENS`` (TOKENS with a trailing S)
+# and ``KEYBOARD``/``TOKENIZERS_PARALLELISM`` stay untouched, mirroring the
+# word-boundary policy of the snapshot scrub.
+_SECRET_NAME_WORD_RE = re.compile(
+    r"(?:^|[_\-])(?:key|keys|token|tokens|secret|secrets|password|passwd|credential|credentials|private)(?:$|[_\-0-9])"
+)
+_SECRET_NAME_CAMEL = ("apikey", "secretkey", "authkey", "accesskey", "privatekey")
+
+# Quoted (incl. multi-line, re.DOTALL) assignments to credential-shaped names —
+# a shape the upstream assignment pass misses when the value contains spaces.
+_QUOTED_SECRET_ASSIGN_RE = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_.\-]*)\s*=\s*(['\"])([^'\"]*)\2", re.DOTALL
+)
+
+
+def _name_has_secret_word(name: str) -> bool:
+    low = name.lower()
+    if any(word in low for word in _SECRET_NAME_CAMEL):
+        return True
+    return bool(_SECRET_NAME_WORD_RE.search(low))
+
+
+def _guardian_egress_redact(text: str) -> str:
+    """Redact *text* before it leaves for the guardian LLM. Fail-closed: any
+    redactor failure returns a safe placeholder, never the raw text."""
+    if not text:
+        return text
+    text = _SECRET_FILE_PATH_RE.sub(lambda m: f"<secret-file:{m.group('base')}>", text)
+    text = _SECRET_FILE_BARE_RE.sub(lambda m: f"<secret-file:{m.group(1)}>", text)
+
+    def _sub_quoted(m: re.Match) -> str:
+        value = m.group(3)
+        # Credential-shaped name AND secret-shaped value (>=8 chars, not a bare
+        # number): keeps MAX_TOKENS='100' and similar counters untouched.
+        if value and len(value) >= 8 and not value.isdigit() and _name_has_secret_word(m.group(1)):
+            return f"{m.group(1)}={m.group(2)}<redacted>{m.group(2)}"
+        return m.group(0)
+
+    text = _QUOTED_SECRET_ASSIGN_RE.sub(_sub_quoted, text)
+    try:
+        from agent.redact import redact_sensitive_text
+
+        return redact_sensitive_text(text, force=True, redact_url_credentials=True)
+    except Exception as exc:
+        logger.warning("Guardian egress redaction failed (%s: %s); failing closed",
+                       type(exc).__name__, exc)
+        return "<redacted:guardian-egress-redaction-failed>"
+
+
 def _smart_approve(command: str, description: str) -> str:
     """Ask the auxiliary LLM; return 'approve', 'deny', or 'escalate' (uncertain/failed).
 
@@ -98,8 +175,11 @@ def _smart_approve(command: str, description: str) -> str:
                 f"{operator_policy}"
             )
         user_prompt = (
-            f"The following command was flagged as: {description}\n\n"
-            f"<command>\n{_strip_shell_comments(command)}\n</command>\n\n"
+            # T2 (WO-D-2026-09-16-003-01): both fields go through the fail-closed
+            # egress redaction — the raw command referenced .env/secrets paths and
+            # literal credentials that were being shipped to a third-party provider.
+            f"The following command was flagged as: {_guardian_egress_redact(description)}\n\n"
+            f"<command>\n{_guardian_egress_redact(_strip_shell_comments(command))}\n</command>\n\n"
             "Assess the ACTUAL risk of the shell operations in this command. "
             "Many flagged commands are false positives — for example, "
             '`python -c "print(\'hello\')"` is flagged as "script execution '
@@ -140,6 +220,9 @@ def _smart_verdict(command: str, description: str, pattern_key: str,
     else:
         _ctx._fire_approval_hook("pre_approval_request", **payload)
     verdict = _smart_approve(command, description)
-    if payload is not None and verdict in {"approve", "deny"}:
+    # T2 (WO-D-2026-09-16-003-01): escalate verdicts are audited too, so
+    # "guardian escalated everything" is an observable fact in the audit
+    # JSONL instead of an inference from missing records.
+    if payload is not None and verdict in {"approve", "deny", "escalate"}:
         _ctx._fire_approval_hook("post_approval_response", **payload, choice=f"smart_{verdict}", decided_by="aux_llm")
     return verdict
