@@ -224,6 +224,7 @@ class TestCronjobToolReasoningEffort:
                     "action": "create",
                     "prompt": "daily digest",
                     "schedule": "every 1h",
+                    "deliver": "local",
                     "reasoning_effort": "max",
                 }
             )

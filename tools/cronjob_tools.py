@@ -564,6 +564,17 @@ def _action_create(a: Dict[str, Any]) -> str:
     deliver = _normalize_deliver_param(a["deliver"])
     if not a["schedule"]:
         return tool_error("schedule is required for create", success=False)
+    # Fleet governance hard gate (D-2026-09-18-054): creation must carry an explicit deliver
+    # target. Implicit-origin creation (no deliver param outside a cron run) is rejected so a
+    # policy-less origin job can never silently slip past the fleet lint; cron-run shells
+    # resolve to a concrete target and pass. An EXPLICIT 'origin' still creates (conscious
+    # choice) — the lint remains the governance signal for it.
+    resolved_deliver = _resolve_cron_context_deliver(deliver)
+    if resolved_deliver is None:
+        return tool_error(
+            "create requires an explicit deliver target (implicit-origin creation is disallowed): "
+            "pass 'local' or a concrete platform:chat_id[:thread_ts] destination",
+            success=False)
     canonical_skills = _canonical_skills(a["skill"], a["skills"])
     _no_agent = bool(a["no_agent"])
     # no_agent=True -> the script IS the job (prompt/skills optional); else prompt or skills.
@@ -602,7 +613,7 @@ def _action_create(a: Dict[str, Any]) -> str:
     try:
         job = create_job_with_scheduler_registration(
             prompt=prompt or "", schedule=a["schedule"], name=a["name"], repeat=a["repeat"],
-            deliver=_resolve_cron_context_deliver(deliver), origin=_origin_from_env(), skills=canonical_skills,
+            deliver=resolved_deliver, origin=_origin_from_env(), skills=canonical_skills,
             model=_normalize_optional_job_value(a["model"]), provider=_normalize_optional_job_value(a["provider"]),
             base_url=_normalize_optional_job_value(a["base_url"], strip_trailing_slash=True),
             script=_normalize_optional_job_value(script), context_from=context_from,
@@ -613,6 +624,7 @@ def _action_create(a: Dict[str, Any]) -> str:
             # CLI-only lane: absent from CRONJOB_SCHEMA and the model dispatch (models don't pick models).
             reasoning_effort=a["reasoning_effort"],
             failure_deliver=_resolve_cron_context_deliver(_normalize_deliver_param(a["failure_deliver"])),
+            delivery_policy=a["delivery_policy"],
             **({"paused": a["paused"], "paused_reason": a["paused_reason"]}
                if a["paused"] is not False or a["paused_reason"] is not None else {}))
     except CronSchedulerRegistrationError as exc:
@@ -626,7 +638,8 @@ def _action_create(a: Dict[str, Any]) -> str:
     _result = {
         "success": True, "job_id": job["id"], "name": job["name"], "skill": job.get("skill"),
         "skills": job.get("skills", []), "schedule": job["schedule_display"], "repeat": _repeat_display(job),
-        "deliver": job.get("deliver", "local"), "next_run_at": job["next_run_at"], "job": _format_job(job),
+        "deliver": job.get("deliver", "local"), "delivery_policy": job.get("delivery_policy"),
+        "next_run_at": job["next_run_at"], "job": _format_job(job),
         "message": _create_message, **_gateway_liveness_notice(),
     }
     return _dumps(_with_guidance(_result, job, deliver))
@@ -751,6 +764,10 @@ def _update_core_fields(job: Dict[str, Any], a: Dict[str, Any], updates: Dict[st
                 return bot_chat_error
             _norm_fd = _resolve_cron_context_deliver(_norm_fd)
         updates["failure_deliver"] = _norm_fd
+    if a["delivery_policy"] is not None:
+        # '' clears the stored policy (lint then re-flags it, matching pre-fill state);
+        # non-empty values validate inside update_job (invalid => tool error).
+        updates["delivery_policy"] = None if a["delivery_policy"] == "" else a["delivery_policy"]
     if skills is not None or skill is not None:
         canonical_skills = _canonical_skills(skill, skills)
         updates["skills"] = canonical_skills
@@ -957,6 +974,7 @@ def cronjob(
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[Union[str, List[str]]] = None,
+    delivery_policy: Optional[str] = None,
     all: Optional[bool] = None,
     task_id: str = None,
     session_id: Optional[str] = None,
@@ -1049,6 +1067,10 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
                 "type": "string",
                 "description": "Optional override target for FAILURE notices only (same grammar as deliver). When set, engine failure/interruption notices go here instead of the deliver target; 'local' suppresses them entirely (state still recorded in cron list/run history). Use for jobs delivering into shared channels where failure noise is unwanted. Omit = failures follow deliver (default). On update, '' clears."
             },
+            "delivery_policy": {
+                "type": "string",
+                "description": "Fleet governance tag for the delivery destination. Omitted on create => auto-derived from the resolved deliver target (local / slack_report / slack_alert / slack_project); targets outside the fleet's managed set (origin, telegram, unknown channels) stay policy-less and the fleet lint flags them. Pass explicitly only to override the derivation; invalid values are rejected. On update, '' clears the stored value."
+            },
             "skills": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -1115,7 +1137,7 @@ def check_cronjob_requirements() -> bool:
 # create/edit --model`, hand-edited jobs) — the agent must not point unattended spend at a
 # different model. Programmatic callers of cronjob() itself retain the parameters.
 _HANDLER_FORWARDED_ARGS = (
-    "job_id", "prompt", "schedule", "name", "repeat", "deliver", "failure_deliver", "skill", "skills", "reason",
+    "job_id", "prompt", "schedule", "name", "repeat", "deliver", "failure_deliver", "delivery_policy", "skill", "skills", "reason",
     "script", "context_from", "continuity", "enabled_toolsets", "workdir", "no_agent", "attach_to_session",
     "paused_reason", "all")
 
