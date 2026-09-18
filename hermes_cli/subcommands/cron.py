@@ -35,6 +35,11 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "--deliver). 'local' suppresses failure notices entirely; run "
             "state stays visible in `hermes cron list`. Omit = failures "
             "follow --deliver.")
+    cron_create.add_argument("--delivery-policy", dest="delivery_policy",
+        help="Fleet governance tag for the delivery destination. Omit to "
+            "auto-derive from --deliver (local/slack_report/slack_alert/"
+            "slack_project); unmanaged targets stay policy-less for the "
+            "fleet lint to flag.")
     cron_create.add_argument("--repeat", type=int, help="Optional repeat count")
     cron_create.add_argument("--skill", dest="skills", action="append",
         help="Attach a skill. Repeat to add multiple skills.")
@@ -94,6 +99,9 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_edit.add_argument("--failure-deliver", dest="failure_deliver",
         help="Override target for failure notices (same grammar as --deliver; "
             "'local' suppresses; '' clears the override)")
+    cron_edit.add_argument("--delivery-policy", dest="delivery_policy",
+        help="Fleet governance tag for the delivery destination; '' clears "
+            "the stored value")
     cron_edit.add_argument("--repeat", type=int, help="New repeat count")
     cron_edit.add_argument("--skill", dest="skills", action="append",
         help="Replace the job's skills with this set. Repeat to attach multiple skills.")
