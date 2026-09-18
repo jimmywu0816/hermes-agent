@@ -19,7 +19,8 @@ def test_paused_creation_is_inert_until_operator_action(tmp_path, monkeypatch, m
     with jobs.use_cron_store(tmp_path / "cron"):
         def create(**kwargs):
             return json.loads(cronjob_tools.registry.dispatch("cronjob_manage", {
-                "action": "create", "schedule": "every 1h", "prompt": "canary", **kwargs}))
+                "action": "create", "schedule": "every 1h", "prompt": "canary",
+                "deliver": "local", **kwargs}))
 
         active = create()
         assert active["success"] and active["job"]["enabled"]
