@@ -418,7 +418,7 @@ class GatewayInboundMixin:
                     try:
                         await _clarify_adapter.retire_clarify_card(
                             _pending_clarify.clarify_id,
-                            f"✅ answered: {_pending_clarify.response or _raw_clarify_reply}")
+                            f"✏️ 你的回覆（＝你打的這句，非 bot 的回答）：{_pending_clarify.response or _raw_clarify_reply}")
                     except Exception:
                         logger.debug("Failed to retire clarify card after typed answer", exc_info=True)
             return ""
