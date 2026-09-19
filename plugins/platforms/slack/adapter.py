@@ -5428,8 +5428,9 @@ class SlackAdapter(BasePlatformAdapter):
                 await self._get_client(channel_id, team_id=team_id or None).chat_postMessage(
                     **post_kwargs)
             logger.info(
-                "Slack button resolved slash-confirm for session %s (choice=%s, user=%s)",
-                session_key, choice, user_name)
+                "Slack button resolved slash-confirm for session %s (choice=%s, user=%s/%s, "
+                "channel=%s, message=%s)",
+                session_key, choice, user_name, user_id, channel_id, msg_ts)
         except Exception as exc:
             logger.error(
                 "Failed to resolve slash-confirm from Slack button: %s", exc, exc_info=True)
@@ -5465,8 +5466,10 @@ class SlackAdapter(BasePlatformAdapter):
             from tools.approval import resolve_gateway_approval
             count = resolve_gateway_approval(session_key, choice)
             logger.info(
-                "Slack button resolved %d approval(s) for session %s (choice=%s, user=%s)", count,
-                session_key, choice, user_name)
+                "Slack button resolved %d approval(s) for session %s (choice=%s, user=%s/%s, "
+                "channel=%s, message=%s, action_ts=%s)", count,
+                session_key, choice, user_name, user_id, channel_id, msg_ts,
+                (body.get("actions") or [{}])[0].get("action_ts", ""))
         except Exception as exc:
             logger.error("Failed to resolve gateway approval from Slack button: %s", exc)
             count = 0
@@ -5553,8 +5556,9 @@ class SlackAdapter(BasePlatformAdapter):
                 channel_id, msg_ts, original_text, f"✅ {user_name}: {resolved_text}")
             # Privacy: choice text may carry user context — INFO gets metadata only.
             logger.info(
-                "Slack button resolved clarify (id=%s, choice_index=%d, user=%s)", clarify_id, idx,
-                user_name)
+                "Slack button resolved clarify (id=%s, choice_index=%d, user=%s/%s, channel=%s, "
+                "message=%s)", clarify_id, idx,
+                user_name, user_id, channel_id, msg_ts)
             logger.debug("Slack clarify choice text (id=%s): %.100r", clarify_id, resolved_text)
         else:
             # Entry evicted/gateway restarted — show expiry, not a misleading ✓.
