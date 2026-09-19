@@ -564,11 +564,18 @@ def _action_create(a: Dict[str, Any]) -> str:
     deliver = _normalize_deliver_param(a["deliver"])
     if not a["schedule"]:
         return tool_error("schedule is required for create", success=False)
-    # Fleet governance hard gate (D-2026-09-18-054): creation must carry an explicit deliver
-    # target. Implicit-origin creation (no deliver param outside a cron run) is rejected so a
-    # policy-less origin job can never silently slip past the fleet lint; cron-run shells
-    # resolve to a concrete target and pass. An EXPLICIT 'origin' still creates (conscious
-    # choice) — the lint remains the governance signal for it.
+    # Fleet governance hard gate (D-2026-09-18-054, tightened WO-D-2026-09-18-067-01):
+    # creation must carry an explicit deliver target in ALL contexts — an omitted deliver
+    # used to resolve to the cron run's creator target BEFORE the gate and slip past the
+    # "must be explicit" contract. An EXPLICIT 'origin' (or any explicit target) still
+    # creates: cron-context resolution applies to explicit values only; the lint remains
+    # the governance signal for unmanaged choices.
+    if deliver is None:
+        return tool_error(
+            "create requires an explicit deliver target (omitted deliver is disallowed in "
+            "all contexts, including cron runs): pass 'local' or a concrete "
+            "platform:chat_id[:thread_ts] destination",
+            success=False)
     resolved_deliver = _resolve_cron_context_deliver(deliver)
     if resolved_deliver is None:
         return tool_error(

@@ -38,6 +38,10 @@ class TestDeriveDeliveryPolicy:
         ("telegram:-1001234567890", None),
         ("slack:C0BUNKNOWN9", None),
         ("slack:C0BU1JH6XDM,local", None),
+        ("slack:C0BUK7C8JAW:1789669561.491669", "slack_project"),
+        ("slack:C0BUK7C8JAW", "slack_project"),
+        ("slack:C0BVBTDK6NL", "slack_project"),
+        ("slack:C0BUKBA6LBE", None),  # bare report channel: lint requires a thread suffix
         (None, None),
         ("", None),
     ])
@@ -81,6 +85,19 @@ class TestCreateJobDeliveryPolicy:
                                 delivery_policy="slack_banana")
             assert jobs.load_jobs() == []
 
+    def test_explicit_policy_conflicting_with_deliver_raises(self, tmp_path):
+        # WO-D-2026-09-18-067-01: an explicit policy must agree with the derived
+        # one; unmanaged targets (derived None) keep the conscious-choice path.
+        with jobs.use_cron_store(tmp_path / "cron"):
+            with pytest.raises(ValueError, match="conflicts with deliver"):
+                jobs.create_job(prompt="hi", schedule="every 1h", deliver="local",
+                                delivery_policy="slack_project")
+            assert jobs.load_jobs() == []
+            job = jobs.create_job(prompt="hi", schedule="every 1h",
+                                  deliver="slack:C0BU1JH6XDM",
+                                  delivery_policy="slack_alert")
+            assert job["delivery_policy"] == "slack_alert"
+
 
 class TestUpdateJobDeliveryPolicy:
     def _seed(self, tmp_path):
@@ -109,6 +126,23 @@ class TestUpdateJobDeliveryPolicy:
             job = jobs.create_job(prompt="hi", schedule="every 1h",
                                   deliver="slack:C0BU1JH6XDM")
             updated = jobs.update_job(job["id"], {"last_error": "transient"})
+            assert updated["delivery_policy"] == "slack_alert"
+
+    def test_explicit_policy_conflict_raises_before_merge(self, tmp_path):
+        # WO-D-2026-09-18-067-01: explicit policy vs the deliver in effect after
+        # the merge — conflict raises before persisting, store byte-identical.
+        with jobs.use_cron_store(tmp_path / "cron"):
+            job = jobs.create_job(prompt="hi", schedule="every 1h", deliver="local")
+            before = json.dumps(jobs.load_jobs(), sort_keys=True)
+            with pytest.raises(ValueError, match="conflicts with deliver"):
+                jobs.update_job(job["id"], {"delivery_policy": "slack_project"})
+            assert json.dumps(jobs.load_jobs(), sort_keys=True) == before
+
+    def test_deliver_retarget_rederives_policy(self, tmp_path):
+        # Deliver retargeted without an explicit policy: managed target re-derives.
+        with jobs.use_cron_store(tmp_path / "cron"):
+            job = jobs.create_job(prompt="hi", schedule="every 1h", deliver="local")
+            updated = jobs.update_job(job["id"], {"deliver": "slack:C0BU1JH6XDM"})
             assert updated["delivery_policy"] == "slack_alert"
 
 
