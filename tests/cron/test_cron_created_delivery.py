@@ -73,14 +73,19 @@ def _create(deliver=None):
 
 
 class TestCronContextDeliveryResolution:
-    def test_omitted_deliver_resolves_to_creator_target(self, temp_cron_home):
+    def test_omitted_deliver_rejected_even_in_cron_context(self, temp_cron_home):
+        # WO-D-2026-09-18-067-01: the explicit-deliver hard gate runs BEFORE
+        # cron-context resolution — an omitted deliver must be rejected even
+        # when a creator target is resolvable (the old contract let it slip
+        # through as the creator target, contradicting the D-2026-09-18-054
+        # "explicit deliver required" ruling).
         tokens, extra = _enter_cron_context("telegram", "-100123456", "17")
         try:
             result = _create()
         finally:
             _exit_cron_context(tokens, extra)
-        assert result["success"] is True
-        assert result["deliver"] == "telegram:-100123456:17"
+        assert result["success"] is False
+        assert "explicit deliver" in result["error"]
 
     def test_literal_origin_resolves_to_creator_target(self, temp_cron_home):
         tokens, extra = _enter_cron_context("telegram", "-100123456", "17")
