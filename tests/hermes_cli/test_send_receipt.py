@@ -51,11 +51,11 @@ def test_skipped_receipt_prints_note(capsys):
 
 
 def test_skipped_without_note_names_reason(capsys):
-    code = _emit_result(json.dumps({"success": True, "skipped": True, "reason": "duplicate_content"}),
+    code = _emit_result(json.dumps({"success": True, "skipped": True, "reason": "cron_auto_delivery_duplicate_target"}),
                         json_mode=False, quiet=False, channel_hint=None)
     out = capsys.readouterr().out.strip()
     assert code == 0
-    assert out == "skipped (duplicate_content)"
+    assert out == "skipped (cron_auto_delivery_duplicate_target)"
 
 
 def test_error_still_goes_to_stderr(capsys):

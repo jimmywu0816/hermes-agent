@@ -278,7 +278,7 @@ def _handle_send(args):
         if isinstance(result, dict) and result.get("success"):
             if used_home_channel:
                 result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
-            if mirror_text and _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
+            if mirror_text and not result.get("skipped") and _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
                 result["mirrored"] = True
             if media_dropped:
                 # The text went out but an attachment the caller asked for did not: a script reading
@@ -509,15 +509,9 @@ async def _send_live_adapter_media(adapter, chat_id, message, media_files, *, th
     caption, separate_text = _media_caption_split(message, media_files, max_caption_len=_DEFAULT_CAPTION_LIMIT)
     last_result = None
     if separate_text and separate_text.strip():
-        from gateway.platforms.base import outbound_duplicate_check, outbound_duplicate_record
-        _dedup_platform = getattr(getattr(adapter, "platform", None), "value", None) or "unknown"
-        if outbound_duplicate_check(_dedup_platform, chat_id, thread_id, separate_text):
-            separate_text = ""  # duplicate text of a recent delivery — the media itself still goes out
-        else:
-            last_result = await adapter.send(chat_id=chat_id, content=separate_text, metadata=metadata)
-            if not last_result.success:
-                return {"error": f"Adapter send failed: {_bounded_send_error(last_result.error)}"}
-            outbound_duplicate_record(_dedup_platform, chat_id, thread_id, separate_text)
+        last_result = await adapter.send(chat_id=chat_id, content=separate_text, metadata=metadata)
+        if not last_result.success:
+            return {"error": f"Adapter send failed: {_bounded_send_error(last_result.error)}"}
     from gateway.platforms.base import BasePlatformAdapter
     total = len(media_files)
     for index, descriptor in enumerate(media_files):
@@ -582,12 +576,6 @@ async def _send_via_adapter(platform, pconfig, chat_id, chunk, *, thread_id=None
                     adapter, chat_id, chunk, media_files, thread_id=thread_id, metadata=metadata,
                     force_document=force_document)
             else:
-                from gateway.platforms.base import outbound_duplicate_check
-                if outbound_duplicate_check(platform_name, chat_id, thread_id, chunk):
-                    return {"success": True, "skipped": True, "reason": "duplicate_content",
-                            "note": ("Skipped send_message: identical content was already delivered to "
-                                     "this target within the last 120 seconds (duplicate_content). "
-                                     "Reword the message if a second copy is genuinely needed.")}
                 make_coro = lambda: adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)  # noqa: E731
             result = await _dispatch_on_gateway_loop(
                 runner, make_coro, f"send_message: failed to schedule{' media send' if media_files else ''} on gateway loop")
@@ -598,9 +586,6 @@ async def _send_via_adapter(platform, pconfig, chat_id, chunk, *, thread_id=None
         if isinstance(result, dict):
             return result
         if result.success:
-            if not media_files:
-                from gateway.platforms.base import outbound_duplicate_record
-                outbound_duplicate_record(platform_name, chat_id, thread_id, chunk)
             return {"success": True, "message_id": result.message_id}
         return {"error": f"Adapter send failed: {_bounded_send_error(result.error)}"}
     try:
