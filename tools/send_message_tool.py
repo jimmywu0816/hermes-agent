@@ -240,6 +240,8 @@ def _handle_send(args):
             return tool_error(err)
     if duplicate_skip := _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id):
         return json.dumps(duplicate_skip)
+    if duplicate_skip := _maybe_skip_origin_duplicate_send(platform_name, chat_id, thread_id):
+        return json.dumps(duplicate_skip)
     # Slack: resolve user targets to DM channel IDs before sending. _parse_target_ref emits internal
     # ``user:U...`` / ``user_name:@handle`` targets; a bare U... id can also arrive from session metadata or
     # the home-channel config. All are opened via conversations.open (fixes #19236).
@@ -276,7 +278,7 @@ def _handle_send(args):
         if isinstance(result, dict) and result.get("success"):
             if used_home_channel:
                 result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
-            if mirror_text and _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
+            if mirror_text and not result.get("skipped") and _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
                 result["mirrored"] = True
             if media_dropped:
                 # The text went out but an attachment the caller asked for did not: a script reading
@@ -468,6 +470,29 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
     return {"success": True, "skipped": True, "reason": "cron_auto_delivery_duplicate_target", "target": target_label,
         "note": (f"Skipped send_message to {target_label}. This cron job will already auto-deliver "
                  "its final response to that same target. Put the intended user-facing content in "
+                 "your final response instead, or use a different target if you want an additional message.")}
+
+
+def _maybe_skip_origin_duplicate_send(platform_name: str, chat_id: str | None, thread_id: str | None):
+    """Skip redundant sends to the session's own routing origin: the final response already
+    auto-delivers there (WO-D-2026-09-14-019-04 D, generalizing the cron guard to every origin).
+    The origin comes from the session ContextVars, falling back to os.environ so a ``hermes send``
+    subprocess — which inherits the gateway's exported origin — is covered too."""
+    if not chat_id:
+        return None
+    from gateway.session_context import get_session_env
+    origin_platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
+    origin_chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+    origin_thread = get_session_env("HERMES_SESSION_THREAD_ID", "").strip() or None
+    if not (origin_platform and origin_chat_id
+            and origin_platform == str(platform_name).strip().lower()
+            and origin_chat_id == str(chat_id)
+            and origin_thread == (str(thread_id) if thread_id is not None else None)):
+        return None
+    target_label = f"{platform_name}:{chat_id}" + (f":{thread_id}" if thread_id is not None else "")
+    return {"success": True, "skipped": True, "reason": "origin_auto_delivery_duplicate_target", "target": target_label,
+        "note": (f"Skipped send_message to {target_label}. This session's final response will already "
+                 "auto-deliver to that same origin target. Put the intended user-facing content in "
                  "your final response instead, or use a different target if you want an additional message.")}
 
 
