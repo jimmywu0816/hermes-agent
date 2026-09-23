@@ -10,7 +10,7 @@ in the default set so an unset ``fields`` renders exactly as before), ``served_m
 requested one), ``cwd`` (home-relative), ``cost`` (session cumulative estimated USD, opt-in —
 rendered ``≈$N.NN`` with per-magnitude precision; skipped when unmeasured or ≤0, never
 ``$?``), ``parallel`` (live running delegated-children count, opt-in — rendered
-``並行N``; skipped when unmeasured/0/non-int, never ``並行0``). ``gateway/run.py`` appends the footer to the final
+``並行N`` including ``並行0``; unmeasured/non-int falls back to ``並行?``, never skipped). ``gateway/run.py`` appends the footer to the final
 response only (never to tool-progress or streaming partials); when streaming already delivered the
 text, it goes out as a trailing message via ``send_trailing_footer()``."""
 
@@ -127,10 +127,12 @@ def format_runtime_footer(*, provider: Optional[str] = None,
             else f"≈${session_cost_usd:.2f}"
         ),
         # Live running delegated-children count (WO-D-2026-09-23-015-01 T1b): opt-in like
-        # latency/cost — None/0/non-int skips the whole column, so no ``並行0``/``並行None``
-        # artifact ever renders.
+        # latency/cost, but ALWAYS renders once listed — a measured int >= 0 gives ``並行N``
+        # (incl. ``並行0``); None/non-int is unmeasurable and gives the honest ``並行?``.
         "parallel": lambda: (
-            f"並行{parallel_children}" if isinstance(parallel_children, int) and parallel_children > 0 else ""
+            f"並行{parallel_children}"
+            if isinstance(parallel_children, int) and parallel_children >= 0
+            else "並行?"
         ),
         "cwd": lambda: _home_relative_cwd(cwd or _env_cwd()),
     }
@@ -151,7 +153,8 @@ def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str |
     ``latency`` field. ``profile`` feeds the ``bot`` field (with ``bot_name`` config override);
     ``reasoning_effort`` is the caller-resolved THIS-turn reasoning effort. ``session_cost_usd``
     feeds the opt-in ``cost`` field; ``None`` (or ≤0) skips it entirely. ``parallel_children``
-    feeds the opt-in ``parallel`` field; ``None``/0/non-int skips it entirely."""
+    feeds the opt-in ``parallel`` field; a measured int (incl. 0) renders ``並行N``, while
+    ``None``/non-int renders ``並行?`` rather than being skipped."""
     cfg = resolve_footer_config(user_config, platform_key)
     if not cfg.get("enabled"):
         return ""

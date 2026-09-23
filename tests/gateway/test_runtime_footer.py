@@ -516,15 +516,25 @@ def test_format_footer_parallel_renders():
     assert out == "並行2"
 
 
-@pytest.mark.parametrize("parallel_children", [0, None, "3", 2.0])
-def test_format_footer_parallel_zero_none_or_nonint_skips(parallel_children):
-    """0 / None / non-int is missing data: the whole column is skipped — no ``並行0`` artifact."""
+def test_format_footer_parallel_zero_renders():
+    """A measured zero count renders as ``並行0`` permanently (owner ruling 2026-09-24)."""
+    out = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        parallel_children=0, fields=("parallel",),
+    )
+    assert out == "並行0"
+
+
+@pytest.mark.parametrize("parallel_children", [None, "3", 2.0])
+def test_format_footer_parallel_unmeasurable_renders_placeholder(parallel_children):
+    """None / non-int is unmeasurable data: the column still renders ``並行?`` — never skipped,
+    never faked as 0."""
     out = format_runtime_footer(
         model="m", context_tokens=0, context_length=None, cwd="",
         parallel_children=parallel_children, fields=("parallel", "model"),
     )
-    assert out == "m"
-    assert "並行" not in out
+    assert out == "並行? · m"
+    assert "並行0" not in out
 
 
 def test_parallel_not_in_default_fields():

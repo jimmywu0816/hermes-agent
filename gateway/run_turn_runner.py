@@ -2008,8 +2008,9 @@ class TurnRunner:
         # dispatched, i.e. async_delegations rows whose state is still live ('running' /
         # 'finalizing'), each row weighted by its fan-out width (an is_batch row counts its
         # task_indexes / goals, a plain row counts 1). Read from THIS profile's state.db
-        # (same handle lineage as the session-row reads above) opened read-only; 0 live rows
-        # or any failure degrades to None -> the footer skips the column; this never raises.
+        # same handle lineage as the session-row reads above) opened read-only; success always
+        # yields an int (0 live rows -> 0, rendered ``並行0``), while any failure degrades to None
+        # and the footer renders ``並行?``; this never raises.
         _parallel_children = None
         with suppress(Exception):
             _par_total = 0
@@ -2035,7 +2036,7 @@ class TurnRunner:
                     _par_total += max(1, len(_par_children))
                 else:
                     _par_total += 1
-            _parallel_children = _par_total if _par_total > 0 else None
+            _parallel_children = _par_total
         usage = {
             "last_prompt_tokens": getattr(comp, "last_prompt_tokens", 0) if has_comp else 0,
             "input_tokens": getattr(agent, "session_prompt_tokens", 0) if has_comp else 0,
