@@ -75,10 +75,17 @@ def record_aux_usage(
             return
         model = str(getattr(response, "model", "") or "") or "unknown"
         estimated_cost = None
+        actual_cost = None
+        cost_status = None
+        cost_source = None
         try:
             cost = estimate_usage_cost(model, usage, provider=provider, base_url=base_url)
+            cost_status = cost.status
+            cost_source = cost.source
             if cost.amount_usd is not None:
                 estimated_cost = float(cost.amount_usd)
+            if cost.status == "actual" and cost.amount_usd is not None:
+                actual_cost = float(cost.amount_usd)
         except Exception:
             logger.debug("Aux usage cost estimation failed", exc_info=True)
         session_db.record_auxiliary_usage(
@@ -86,6 +93,7 @@ def record_aux_usage(
             input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens, cache_write_tokens=usage.cache_write_tokens,
             reasoning_tokens=usage.reasoning_tokens, estimated_cost_usd=estimated_cost,
+            actual_cost_usd=actual_cost, cost_status=cost_status, cost_source=cost_source,
         )
     except Exception:
         logger.debug("Aux usage recording failed (non-fatal)", exc_info=True)

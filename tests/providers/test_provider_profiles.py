@@ -93,6 +93,45 @@ class TestOpenRouterProfile:
         body = p.build_extra_body(provider_preferences={"allow": ["anthropic"]})
         assert body["provider"] == {"allow": ["anthropic"]}
 
+    def test_get_usage_cost_reads_inline_provider_cost(self):
+        """OpenRouter's inline ``usage.cost`` becomes an actual CostResult."""
+        from agent.usage_pricing import CanonicalUsage
+        p = get_provider_profile("openrouter")
+        cost = p.get_usage_cost("openai/gpt-5.6-sol", CanonicalUsage(raw_usage={"cost": 0.0015}))
+        assert cost is not None
+        assert cost.status == "actual"
+        assert cost.source == "provider_cost_api"
+        assert float(cost.amount_usd) == 0.0015
+        assert cost.label  # rendered display label
+
+    def test_get_usage_cost_zero_is_valid(self):
+        """A reported 0 (free route) is still an actual cost, not a missing value."""
+        from agent.usage_pricing import CanonicalUsage
+        p = get_provider_profile("openrouter")
+        cost = p.get_usage_cost("m", CanonicalUsage(raw_usage={"cost": 0}))
+        assert cost is not None
+        assert cost.status == "actual"
+        assert cost.amount_usd == 0
+
+    def test_get_usage_cost_missing_or_non_numeric_returns_none(self):
+        from agent.usage_pricing import CanonicalUsage
+        p = get_provider_profile("openrouter")
+        for raw in (
+            None, {}, {"cost": None}, {"cost": "0.0015"}, {"cost": True},
+            {"cost": float("inf")}, {"cost": float("-inf")}, {"cost": float("nan")},
+        ):
+            assert p.get_usage_cost("m", CanonicalUsage(raw_usage=raw)) is None
+
+    def test_get_usage_cost_exception_returns_none(self):
+        """The hook sits on the hot path: it must never raise (fallback to estimate)."""
+        class _Boom:
+            @property
+            def raw_usage(self):
+                raise RuntimeError("boom")
+
+        p = get_provider_profile("openrouter")
+        assert p.get_usage_cost("m", _Boom()) is None
+
     def test_sticky_session_id_normalizes_cron_timestamp(self):
         """Cron re-fires of the same job keep the same sticky routing key."""
         p = get_provider_profile("openrouter")

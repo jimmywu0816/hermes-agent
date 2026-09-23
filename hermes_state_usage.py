@@ -370,12 +370,16 @@ class SessionUsageMixin:
         self, session_id: str, task: str, *, model: Optional[str]=None, billing_provider: Optional[str]=None,
         billing_base_url: Optional[str]=None, input_tokens: int=0, output_tokens: int=0, cache_read_tokens: int=0,
         cache_write_tokens: int=0, reasoning_tokens: int=0, estimated_cost_usd: Optional[float]=None,
+        actual_cost_usd: Optional[float]=None, cost_status: Optional[str]=None, cost_source: Optional[str]=None,
         api_call_count: int=1,
     ) -> None:
         """Record an auxiliary LLM call's usage (vision, compression, title generation, ...)
         as a per-(model, provider, task) delta in ``session_model_usage`` WITHOUT touching
         the ``sessions`` summary row (the gateway overwrites those counters with absolute
         main-loop totals). ``api_call_count`` may aggregate N calls. Best-effort.
+
+        ``actual_cost_usd``/``cost_status``/``cost_source`` carry provider-reported actual
+        cost (e.g. OpenRouter's inline ``usage.cost``) alongside the estimated amount.
 
         See #23270.
         Background-review forks record an aggregate of N fork API calls in one write with
