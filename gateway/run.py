@@ -57,7 +57,10 @@ _TELEGRAM_CONNECT_TIMEOUT_SECS_DEFAULT = 180.0
 _TELEGRAM_INITIAL_CONNECT_TIMEOUT_SECS_DEFAULT = 45.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 # Size of the pool that runs turn bodies (blocking agent work).
-_TURN_MAX_WORKERS = 10
+# Local patch (2026-09-23, WO: turn-inactivity timeout event, owner-approved): 10 -> 20.
+# Reason: a burst of 12 turns queued behind 10 marathon turns for 30 min and were reaped as
+# "inactive" by the per-turn watchdog. Re-apply after `hermes update` (upstream default is 10).
+_TURN_MAX_WORKERS = 20
 # Size of the separate pool for best-effort session HOUSEKEEPING; why it is separate: _run_housekeeping_in_executor.
 _HOUSEKEEPING_MAX_WORKERS = 4
 
