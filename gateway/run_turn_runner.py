@@ -1975,29 +1975,33 @@ class TurnRunner:
             else:
                 _effort_label = str(reasoning_config.get("effort") or "").strip()
         # Session cumulative estimated cost for the footer's opt-in ``cost`` field
-        # (WO-D-2026-09-23-015-01). Value = max(persisted SessionEntry.estimated_cost_usd,
-        # in-memory agent.session_estimated_cost_usd): the persisted figure survives gateway
-        # restarts but is written at turn end (this turn not yet included), while the
-        # in-memory figure includes this turn but resets to 0 on restart — the max yields
-        # both current-turn inclusion and restart survival. Any lookup failure degrades to
-        # None and the footer skips the field; this never raises.
+        # (WO-D-2026-09-23-015-01). Primary source = the persisted session row
+        # (``sessions.estimated_cost_usd``, ``actual_cost_usd`` preferred while it is
+        # non-zero), read through the same handle the runner already uses for session rows
+        # (``_current_message_count``): it flushes queued token deltas first, so the figure
+        # includes this turn, and being a DB row it survives gateway restarts. The gateway
+        # SessionEntry deliberately carries no cost (the agent persists usage itself) and
+        # ``agent.session_estimated_cost_usd`` resets with the process, so the live counter
+        # only tops the value up. Any failure degrades to None -> the footer skips the
+        # column; this never raises.
         _session_cost_usd = None
-        try:
-            _persisted_cost = None
-            _entries = getattr(getattr(self._runner, "session_store", None), "_entries", None)
-            if ctx.session_key and _entries is not None:
-                _session_entry = _entries.get(ctx.session_key)
-                if _session_entry is not None:
-                    _persisted_cost = getattr(_session_entry, "estimated_cost_usd", None)
-            _in_memory_cost = getattr(agent, "session_estimated_cost_usd", 0.0) if agent else 0.0
+        with suppress(Exception):
             _cost_sources = []
-            if _persisted_cost is not None:
-                _cost_sources.append(float(_persisted_cost))
+            _session_db = getattr(self._runner, "_session_db", None)
+            if _session_db is not None and ctx.session_id:
+                # run_sync is off-loop (executor); sync DB is fine.
+                row = _session_db._db.get_session(ctx.session_id) or {}
+                _actual = row.get("actual_cost_usd")
+                _estimated = row.get("estimated_cost_usd")
+                if _actual and float(_actual) > 0:
+                    _cost_sources.append(float(_actual))
+                elif _estimated:
+                    _cost_sources.append(float(_estimated))
+            _in_memory_cost = getattr(agent, "session_estimated_cost_usd", 0.0) if agent else 0.0
             if _in_memory_cost:
                 _cost_sources.append(float(_in_memory_cost))
-            _session_cost_usd = max(_cost_sources) if _cost_sources else None
-        except Exception:
-            _session_cost_usd = None
+            if _cost_sources:
+                _session_cost_usd = max(_cost_sources)
         usage = {
             "last_prompt_tokens": getattr(comp, "last_prompt_tokens", 0) if has_comp else 0,
             "input_tokens": getattr(agent, "session_prompt_tokens", 0) if has_comp else 0,
