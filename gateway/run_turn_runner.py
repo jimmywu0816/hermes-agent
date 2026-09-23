@@ -13,6 +13,7 @@ import json
 import logging
 import queue
 import re
+import sqlite3
 import threading
 import time
 from contextlib import suppress
@@ -2002,6 +2003,39 @@ class TurnRunner:
                 _cost_sources.append(float(_in_memory_cost))
             if _cost_sources:
                 _session_cost_usd = max(_cost_sources)
+        # Live delegated-children count for the footer's opt-in ``parallel`` field
+        # (WO-D-2026-09-23-015-01 T1b): the number of running child agents this profile has
+        # dispatched, i.e. async_delegations rows whose state is still live ('running' /
+        # 'finalizing'), each row weighted by its fan-out width (an is_batch row counts its
+        # task_indexes / goals, a plain row counts 1). Read from THIS profile's state.db
+        # (same handle lineage as the session-row reads above) opened read-only; 0 live rows
+        # or any failure degrades to None -> the footer skips the column; this never raises.
+        _parallel_children = None
+        with suppress(Exception):
+            _par_total = 0
+            _par_handle = getattr(self._runner, "_session_db", None)
+            _par_path = getattr(getattr(_par_handle, "_db", None), "db_path", None)
+            if _par_path is None:
+                _par_path = getattr(_par_handle, "db_path", None) if _par_handle is not None else None
+            if _par_path is None:
+                from hermes_state import _default_db_path
+                _par_path = _default_db_path()
+            _par_conn = sqlite3.connect(f"file:{_par_path}?mode=ro", uri=True)
+            try:
+                _par_conn.execute("PRAGMA query_only=ON")
+                _par_rows = _par_conn.execute(
+                    "SELECT task_json FROM async_delegations WHERE state IN ('running','finalizing')"
+                ).fetchall()
+            finally:
+                _par_conn.close()
+            for (_par_task_json,) in _par_rows:
+                _par_task = json.loads(_par_task_json or "{}")
+                if _par_task.get("is_batch"):
+                    _par_children = _par_task.get("task_indexes") or _par_task.get("goals") or []
+                    _par_total += max(1, len(_par_children))
+                else:
+                    _par_total += 1
+            _parallel_children = _par_total if _par_total > 0 else None
         usage = {
             "last_prompt_tokens": getattr(comp, "last_prompt_tokens", 0) if has_comp else 0,
             "input_tokens": getattr(agent, "session_prompt_tokens", 0) if has_comp else 0,
@@ -2011,6 +2045,7 @@ class TurnRunner:
             "effort": _effort_label or None,
             "context_length": (getattr(comp, "context_length", 0) or 0) if has_comp else 0,
             "session_cost_usd": _session_cost_usd,
+            "parallel_children": _parallel_children,
         }
         compacted_in_place, effective_session_id, history_offset = self._sync_session_after_run(agent_history)
         # failure_reason must survive the empty-response path too (TUI billing, transient-failure

@@ -501,3 +501,71 @@ def test_build_footer_line_threads_session_cost():
         session_cost_usd=0.175,
     )
     assert out == "gpt-5.4 · ≈$0.175"
+
+
+# ---------------------------------------------------------------------------
+# parallel — opt-in live running delegated-children count (WO-D-2026-09-23-015-01 T1b)
+# ---------------------------------------------------------------------------
+
+def test_format_footer_parallel_renders():
+    """A measured live delegation count renders as ``並行N``."""
+    out = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        parallel_children=2, fields=("parallel",),
+    )
+    assert out == "並行2"
+
+
+@pytest.mark.parametrize("parallel_children", [0, None, "3", 2.0])
+def test_format_footer_parallel_zero_none_or_nonint_skips(parallel_children):
+    """0 / None / non-int is missing data: the whole column is skipped — no ``並行0`` artifact."""
+    out = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        parallel_children=parallel_children, fields=("parallel", "model"),
+    )
+    assert out == "m"
+    assert "並行" not in out
+
+
+def test_parallel_not_in_default_fields():
+    """``parallel`` is opt-in: unset ``fields`` renders byte-identically to before."""
+    from gateway.runtime_footer import _DEFAULT_FIELDS
+
+    assert "parallel" not in _DEFAULT_FIELDS
+    assert list(_DEFAULT_FIELDS) == _LEGACY_DEFAULT_FIELDS
+    out = format_runtime_footer(
+        model="openai/gpt-5.4", context_tokens=50_247, context_length=1_000_000,
+        cwd="/var/data", parallel_children=7,
+    )
+    assert out == "gpt-5.4 · 5% · /var/data"
+
+
+def test_format_footer_parallel_joined_in_field_order():
+    """Existing field order/semantics unchanged; parallel joins where listed (after cost)."""
+    out = format_runtime_footer(
+        model="m", context_tokens=1, context_length=100, cwd="",
+        session_cost_usd=0.175, parallel_children=3,
+        fields=("model", "context_pct", "cost", "parallel"),
+    )
+    assert out == "m · 1% · ≈$0.175 · 並行3"
+
+
+def test_build_footer_line_threads_parallel_children():
+    """End-to-end: enabled footer with ``parallel`` in fields renders the value."""
+    out = build_footer_line(
+        user_config={
+            "display": {
+                "runtime_footer": {
+                    "enabled": True,
+                    "fields": ["model", "parallel"],
+                }
+            }
+        },
+        platform_key="discord",
+        model="gpt-5.4",
+        context_tokens=0,
+        context_length=None,
+        cwd="",
+        parallel_children=2,
+    )
+    assert out == "gpt-5.4 · 並行2"

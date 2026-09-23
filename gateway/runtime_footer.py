@@ -9,7 +9,8 @@ in the default set so an unset ``fields`` renders exactly as before), ``served_m
 ``x-litellm-model-api-base``, or Hermes' own fallback route; skipped when the served model is the
 requested one), ``cwd`` (home-relative), ``cost`` (session cumulative estimated USD, opt-in —
 rendered ``≈$N.NN`` with per-magnitude precision; skipped when unmeasured or ≤0, never
-``$?``). ``gateway/run.py`` appends the footer to the final
+``$?``), ``parallel`` (live running delegated-children count, opt-in — rendered
+``並行N``; skipped when unmeasured/0/non-int, never ``並行0``). ``gateway/run.py`` appends the footer to the final
 response only (never to tool-progress or streaming partials); when streaming already delivered the
 text, it goes out as a trailing message via ``send_trailing_footer()``."""
 
@@ -87,6 +88,7 @@ def format_runtime_footer(*, provider: Optional[str] = None,
                           turn_seconds: Optional[float] = None,
                           requested_model: Optional[str] = None, served_model: Optional[str] = None,
                           session_cost_usd: Optional[float] = None,
+                          parallel_children: Optional[int] = None,
                           fields: Iterable[str] = _DEFAULT_FIELDS) -> str:
     """Render the footer line, or "" if no fields have data. Fields whose data is missing (and
     unknown field names) are skipped silently — a partial footer beats ``?%`` or empty slots."""
@@ -124,6 +126,12 @@ def format_runtime_footer(*, provider: Optional[str] = None,
             else f"≈${session_cost_usd:.3f}" if session_cost_usd < 1
             else f"≈${session_cost_usd:.2f}"
         ),
+        # Live running delegated-children count (WO-D-2026-09-23-015-01 T1b): opt-in like
+        # latency/cost — None/0/non-int skips the whole column, so no ``並行0``/``並行None``
+        # artifact ever renders.
+        "parallel": lambda: (
+            f"並行{parallel_children}" if isinstance(parallel_children, int) and parallel_children > 0 else ""
+        ),
         "cwd": lambda: _home_relative_cwd(cwd or _env_cwd()),
     }
     return _SEP.join(v for field in fields if (render := renderers.get(field)) and (v := render()))
@@ -135,13 +143,15 @@ def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str |
                       model: Optional[str], context_tokens: int, context_length: Optional[int],
                       cwd: Optional[str] = None, turn_seconds: Optional[float] = None,
                       requested_model: Optional[str] = None, served_model: Optional[str] = None,
-                      session_cost_usd: Optional[float] = None) -> str:
+                      session_cost_usd: Optional[float] = None,
+                      parallel_children: Optional[int] = None) -> str:
     """Entry point for gateway/run.py: footer text, or "" when disabled / no data. Callers append it
     to the final response themselves, preserving a single blank line of separation.
     ``turn_seconds`` is the caller-measured (``time.monotonic()``) run duration; ``None`` skips the
     ``latency`` field. ``profile`` feeds the ``bot`` field (with ``bot_name`` config override);
     ``reasoning_effort`` is the caller-resolved THIS-turn reasoning effort. ``session_cost_usd``
-    feeds the opt-in ``cost`` field; ``None`` (or ≤0) skips it entirely."""
+    feeds the opt-in ``cost`` field; ``None`` (or ≤0) skips it entirely. ``parallel_children``
+    feeds the opt-in ``parallel`` field; ``None``/0/non-int skips it entirely."""
     cfg = resolve_footer_config(user_config, platform_key)
     if not cfg.get("enabled"):
         return ""
@@ -151,4 +161,5 @@ def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str |
                                  context_length=context_length, cwd=cwd, turn_seconds=turn_seconds,
                                  requested_model=requested_model, served_model=served_model,
                                  session_cost_usd=session_cost_usd,
+                                 parallel_children=parallel_children,
                                  fields=cfg.get("fields") or _DEFAULT_FIELDS)
