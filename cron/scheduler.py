@@ -2449,11 +2449,21 @@ class _FireAudit:
 # Same semantics either way: the checkout's HEAD commit id.
 
 
+_OID_RE = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
+
+
+def _normalize_oid(value: Optional[str]) -> Optional[str]:
+    """Lower-cased commit OID, or ``None`` when the text is not a full SHA-1/SHA-256 object id."""
+    text = (value or "").strip().lower()
+    return text if _OID_RE.fullmatch(text) else None
+
+
 def _repo_code_fingerprint(repo_root: Optional[Path] = None) -> Optional[str]:
     """HEAD commit id of the checkout this process runs from, or ``None`` when unresolvable.
 
-    ``None`` (no git metadata, unreadable files, an indirection we cannot follow) means
-    "unknown": callers skip the guard, so installs without a checkout behave exactly as before.
+    ``None`` (no git metadata, unreadable files, an OID that does not validate, an indirection we
+    cannot follow) means "unknown": callers skip the guard, so installs without a checkout behave
+    exactly as before.
     """
     repo = repo_root if repo_root is not None else Path(__file__).resolve().parent.parent
     try:
@@ -2465,23 +2475,36 @@ def _repo_code_fingerprint(repo_root: Optional[Path] = None) -> Optional[str]:
             git_dir = Path(marker.split(":", 1)[1].strip())
             if not git_dir.is_absolute():
                 git_dir = repo / git_dir
+        # A linked worktree keeps HEAD in its per-worktree gitdir but refs/packed-refs in the
+        # common dir (``commondir`` holds the path, relative to this gitdir when not absolute).
+        common_dir = git_dir
+        try:
+            common_marker = (git_dir / "commondir").read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            common_marker = ""
+        if common_marker:
+            common_dir = Path(common_marker)
+            if not common_dir.is_absolute():
+                common_dir = git_dir / common_dir
         head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
         if not head.startswith("ref:"):
-            return head or None  # detached HEAD: the file holds the sha itself
+            return _normalize_oid(head)  # detached HEAD: the file holds the sha itself
         ref = head.split(":", 1)[1].strip()
         try:
-            return (git_dir / ref).read_text(encoding="utf-8", errors="replace").strip() or None
+            loose = (common_dir / ref).read_text(encoding="utf-8", errors="replace").strip()
+            if loose:
+                return _normalize_oid(loose)
         except OSError:
             pass
         # A packed branch ref (git pack-refs) leaves no loose file under refs/.
-        packed = (git_dir / "packed-refs").read_text(encoding="utf-8", errors="replace")
+        packed = (common_dir / "packed-refs").read_text(encoding="utf-8", errors="replace")
         for line in packed.splitlines():
             line = line.strip()
             if not line or line.startswith(("#", "^")):
                 continue
             sha, _, name = line.partition(" ")
             if name.strip() == ref:
-                return sha or None
+                return _normalize_oid(sha)
         return None
     except Exception:
         # Fail-open by design: a best-effort probe must never break a run.
@@ -2502,7 +2525,9 @@ def _stale_code_abort_reason(start_fingerprint: Optional[str]) -> Optional[str]:
     return (
         "Stale cron worker aborted before agent construction: the code checkout changed while "
         f"this run was pending (HEAD {start_fingerprint[:10]} -> {current[:10]}). No agent was "
-        "constructed and the job body did not run; the next scheduled fire uses the updated code."
+        "constructed and the job body did not run. Re-run the job to use the updated code — a "
+        "recurring job's next scheduled fire does that automatically; a one-shot job must be "
+        "re-run explicitly."
     )
 
 
@@ -2534,7 +2559,6 @@ def run_job(
     early, prompt = _prepare_job_prompt(job, job_id, job_name, extra_prompt, cancel_event)
     if early is not None:
         return early
-    from run_agent import AIAgent
 
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
@@ -2550,6 +2574,19 @@ def run_job(
         scope.enter()
         if scope.workdir:
             logger.info("Job '%s': using task-scoped workdir %s", job_id, scope.workdir)
+
+        # Stale-code guard (WO-D-2026-09-23-009-08): if the checkout changed while this run was
+        # pending (long pre-run script crossing the update window), abort BEFORE the first lazy
+        # import of the agent chain — importing run_agent/agent_init from a stale process against
+        # the new on-disk code IS the mixed-code hazard, and an import that fails there would
+        # bypass this guard entirely (leaving the old, indistinguishable ImportError). The raise
+        # stays inside this try so the round still goes through the normal failure bookkeeping.
+        _stale_reason = _stale_code_abort_reason(_code_at_start)
+        if _stale_reason:
+            logger.warning("Job '%s' (ID: %s): %s", job_name, job_id, _stale_reason)
+            raise RuntimeError(_stale_reason)
+
+        from run_agent import AIAgent
         _reload_dotenv_and_publish_delivery_target(job)
 
         jc = _load_cron_job_config(job, job_id, job_name)
@@ -2559,14 +2596,6 @@ def run_job(
         if setup.blocked is not None:
             return setup.blocked
         model = setup.model
-
-        # Stale-code guard: if the checkout changed while this run was pending (long pre-run
-        # script crossing the update window), abort BEFORE opening state.db / constructing the
-        # agent — an outdated worker must never mix its imported modules with new on-disk code.
-        _stale_reason = _stale_code_abort_reason(_code_at_start)
-        if _stale_reason:
-            logger.warning("Job '%s' (ID: %s): %s", job_name, job_id, _stale_reason)
-            raise RuntimeError(_stale_reason)
 
         # Open state.db only after every early-return gate has passed.
         _session_db = _open_cron_session_db(job)

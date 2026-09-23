@@ -27,8 +27,8 @@ _RUNTIME = {
     "api_mode": "chat_completions",
 }
 
-_START = "1111111111aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-_CHANGED = "2222222222bbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+_START = "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"
+_CHANGED = "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c"
 
 
 # --- fingerprint probe ---------------------------------------------------------------------
@@ -53,6 +53,22 @@ def test_fingerprint_reads_detached_head(tmp_path):
     assert _repo_code_fingerprint(tmp_path) == _CHANGED
 
 
+def test_fingerprint_rejects_malformed_oid(tmp_path):
+    git = tmp_path / ".git"
+    git.mkdir()
+    for bad in ("f" * 38, "f" * 41, "z" * 40, "1234", "  "):
+        (git / "HEAD").write_text(f"{bad}\n")
+        assert _repo_code_fingerprint(tmp_path) is None, bad
+
+
+def test_fingerprint_accepts_sha256_oid(tmp_path):
+    git = tmp_path / ".git"
+    git.mkdir()
+    sha256 = "0123456789abcdef" * 4  # 64 hex chars
+    (git / "HEAD").write_text(sha256.upper() + "\n")
+    assert _repo_code_fingerprint(tmp_path) == sha256  # normalized to lower case
+
+
 def test_fingerprint_reads_packed_ref(tmp_path):
     git = tmp_path / ".git"
     git.mkdir()
@@ -73,6 +89,35 @@ def test_fingerprint_follows_gitdir_indirection(tmp_path):
     repo.mkdir()
     (repo / ".git").write_text(f"gitdir: {real_git}\n")
     assert _repo_code_fingerprint(repo) == _START
+
+
+def test_fingerprint_follows_linked_worktree_commondir(tmp_path):
+    """Linked worktree: HEAD lives in the per-worktree gitdir, refs in the common dir."""
+    common = tmp_path / "main-git"
+    (common / "refs" / "heads").mkdir(parents=True)
+    (common / "refs" / "heads" / "main").write_text(f"{_START}\n")
+    wt_git = common / "worktrees" / "wt1"
+    wt_git.mkdir(parents=True)
+    (wt_git / "HEAD").write_text("ref: refs/heads/main\n")
+    (wt_git / "commondir").write_text("../..\n")
+    repo = tmp_path / "wt1"
+    repo.mkdir()
+    (repo / ".git").write_text(f"gitdir: {wt_git}\n")
+    assert _repo_code_fingerprint(repo) == _START
+
+
+def test_fingerprint_linked_worktree_packed_ref(tmp_path):
+    common = tmp_path / "main-git"
+    common.mkdir()
+    (common / "packed-refs").write_text(f"{_CHANGED} refs/heads/main\n")
+    wt_git = common / "worktrees" / "wt2"
+    wt_git.mkdir(parents=True)
+    (wt_git / "HEAD").write_text("ref: refs/heads/main\n")
+    (wt_git / "commondir").write_text("../..\n")
+    repo = tmp_path / "wt2"
+    repo.mkdir()
+    (repo / ".git").write_text(f"gitdir: {wt_git}\n")
+    assert _repo_code_fingerprint(repo) == _CHANGED
 
 
 def test_fingerprint_none_on_bogus_git_file(tmp_path):
@@ -146,6 +191,44 @@ def test_run_job_aborts_before_constructing_agent_on_code_change(tmp_path):
     assert "Stale cron worker aborted" in output
     construct.assert_not_called()
     open_db.assert_not_called()
+    # Not misclassified as a retryable / parked failure (Codex review 建議 1).
+    assert not job.get("_model_unreachable")
+    assert not job.get("_quota_hold_seconds")
+
+
+def test_run_job_probe_order_and_no_setup_before_check(tmp_path):
+    """Order guarantee (WO-009-08 必改 #1): first probe → pre-run script → second probe → abort,
+    with no runtime setup or lazy agent import happening before the check."""
+    job = {"id": "stale-order", "name": "order test", "prompt": "hello", "script": "prerun.py"}
+    order = []
+    fingerprints = iter([_START, _CHANGED])
+
+    def probe():
+        order.append("probe")
+        return next(fingerprints)
+
+    def prerun(*_args, **_kwargs):
+        order.append("prerun")
+        return (True, "ok\n")  # non-empty output: the wake gate and prompt build both proceed
+
+    with patch("cron.scheduler._hermes_home", tmp_path), \
+         patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
+         patch("hermes_cli.env_loader.load_hermes_dotenv"), \
+         patch("hermes_cli.env_loader.reset_secret_source_cache"), \
+         patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=_RUNTIME), \
+         patch("cron.scheduler._repo_code_fingerprint", side_effect=probe), \
+         patch("cron.scheduler._run_job_script_with_claim_heartbeat", side_effect=prerun), \
+         patch("cron.scheduler._reload_dotenv_and_publish_delivery_target") as reload_hook, \
+         patch("cron.scheduler._open_cron_session_db") as open_db, \
+         patch("cron.scheduler._construct_cron_agent") as construct:
+        success, output, final_response, error = run_job(job)
+
+    assert order == ["probe", "prerun", "probe"]
+    assert success is False
+    assert error and "Stale cron worker aborted" in error
+    construct.assert_not_called()
+    open_db.assert_not_called()
+    reload_hook.assert_not_called()  # nothing in the run path ran before the check
 
 
 def test_run_job_constructs_normally_when_fingerprint_unchanged(tmp_path):
