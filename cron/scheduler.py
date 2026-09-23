@@ -2436,6 +2436,76 @@ class _FireAudit:
 
 
 
+# --- Stale-code guard (WO-D-2026-09-23-009-08) ---------------------------------------------
+# A cron worker records the code checkout it started with; a long pre-run script can block for
+# hours and cross the daily 04:30 update window, after which the on-disk code is new while this
+# process still holds the old modules — constructing the agent then mixes old and new code
+# (ImportError / signature drift; brand db5aae922e64 lost five days to exactly that). The guard
+# aborts such a round before anything is built; the next scheduled fire runs on the new code.
+#
+# The probe reads git metadata directly instead of shelling out to ``git rev-parse`` (a refinement
+# of the §8-A sketch): the cron run path must not spawn extra processes — fault-injection
+# harnesses key off Popen ordering, and installs without a git binary on PATH must keep working.
+# Same semantics either way: the checkout's HEAD commit id.
+
+
+def _repo_code_fingerprint(repo_root: Optional[Path] = None) -> Optional[str]:
+    """HEAD commit id of the checkout this process runs from, or ``None`` when unresolvable.
+
+    ``None`` (no git metadata, unreadable files, an indirection we cannot follow) means
+    "unknown": callers skip the guard, so installs without a checkout behave exactly as before.
+    """
+    repo = repo_root if repo_root is not None else Path(__file__).resolve().parent.parent
+    try:
+        git_dir = repo / ".git"
+        if git_dir.is_file():  # worktree / submodule: the file holds "gitdir: <path>"
+            marker = git_dir.read_text(encoding="utf-8", errors="replace").strip()
+            if not marker.startswith("gitdir:"):
+                return None
+            git_dir = Path(marker.split(":", 1)[1].strip())
+            if not git_dir.is_absolute():
+                git_dir = repo / git_dir
+        head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+        if not head.startswith("ref:"):
+            return head or None  # detached HEAD: the file holds the sha itself
+        ref = head.split(":", 1)[1].strip()
+        try:
+            return (git_dir / ref).read_text(encoding="utf-8", errors="replace").strip() or None
+        except OSError:
+            pass
+        # A packed branch ref (git pack-refs) leaves no loose file under refs/.
+        packed = (git_dir / "packed-refs").read_text(encoding="utf-8", errors="replace")
+        for line in packed.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("#", "^")):
+                continue
+            sha, _, name = line.partition(" ")
+            if name.strip() == ref:
+                return sha or None
+        return None
+    except Exception:
+        # Fail-open by design: a best-effort probe must never break a run.
+        return None
+
+
+def _stale_code_abort_reason(start_fingerprint: Optional[str]) -> Optional[str]:
+    """Reason string when the checkout changed since ``start_fingerprint``, else ``None``.
+
+    Aborts only on a *verified* mismatch: an unknown fingerprint on either side returns ``None``
+    (fail-open), which keeps runs on git-less installs unchanged.
+    """
+    if not start_fingerprint:
+        return None
+    current = _repo_code_fingerprint()
+    if not current or current == start_fingerprint:
+        return None
+    return (
+        "Stale cron worker aborted before agent construction: the code checkout changed while "
+        f"this run was pending (HEAD {start_fingerprint[:10]} -> {current[:10]}). No agent was "
+        "constructed and the job body did not run; the next scheduled fire uses the updated code."
+    )
+
+
 def run_job(
     job: dict, *, defer_agent_teardown: Optional[list] = None, extra_prompt: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None, execution_id: Optional[str] = None,
@@ -2458,6 +2528,9 @@ def run_job(
     job_id = job["id"]
     job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
 
+    # Stale-code guard: record the checkout this run started from BEFORE the pre-run script can
+    # block for hours — that wait is what lets an update window change the code underneath us.
+    _code_at_start = _repo_code_fingerprint()
     early, prompt = _prepare_job_prompt(job, job_id, job_name, extra_prompt, cancel_event)
     if early is not None:
         return early
@@ -2486,6 +2559,14 @@ def run_job(
         if setup.blocked is not None:
             return setup.blocked
         model = setup.model
+
+        # Stale-code guard: if the checkout changed while this run was pending (long pre-run
+        # script crossing the update window), abort BEFORE opening state.db / constructing the
+        # agent — an outdated worker must never mix its imported modules with new on-disk code.
+        _stale_reason = _stale_code_abort_reason(_code_at_start)
+        if _stale_reason:
+            logger.warning("Job '%s' (ID: %s): %s", job_name, job_id, _stale_reason)
+            raise RuntimeError(_stale_reason)
 
         # Open state.db only after every early-return gate has passed.
         _session_db = _open_cron_session_db(job)
