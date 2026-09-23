@@ -1974,6 +1974,30 @@ class TurnRunner:
                 _effort_label = "-"
             else:
                 _effort_label = str(reasoning_config.get("effort") or "").strip()
+        # Session cumulative estimated cost for the footer's opt-in ``cost`` field
+        # (WO-D-2026-09-23-015-01). Value = max(persisted SessionEntry.estimated_cost_usd,
+        # in-memory agent.session_estimated_cost_usd): the persisted figure survives gateway
+        # restarts but is written at turn end (this turn not yet included), while the
+        # in-memory figure includes this turn but resets to 0 on restart — the max yields
+        # both current-turn inclusion and restart survival. Any lookup failure degrades to
+        # None and the footer skips the field; this never raises.
+        _session_cost_usd = None
+        try:
+            _persisted_cost = None
+            _entries = getattr(getattr(self._runner, "session_store", None), "_entries", None)
+            if ctx.session_key and _entries is not None:
+                _session_entry = _entries.get(ctx.session_key)
+                if _session_entry is not None:
+                    _persisted_cost = getattr(_session_entry, "estimated_cost_usd", None)
+            _in_memory_cost = getattr(agent, "session_estimated_cost_usd", 0.0) if agent else 0.0
+            _cost_sources = []
+            if _persisted_cost is not None:
+                _cost_sources.append(float(_persisted_cost))
+            if _in_memory_cost:
+                _cost_sources.append(float(_in_memory_cost))
+            _session_cost_usd = max(_cost_sources) if _cost_sources else None
+        except Exception:
+            _session_cost_usd = None
         usage = {
             "last_prompt_tokens": getattr(comp, "last_prompt_tokens", 0) if has_comp else 0,
             "input_tokens": getattr(agent, "session_prompt_tokens", 0) if has_comp else 0,
@@ -1982,6 +2006,7 @@ class TurnRunner:
             "provider": getattr(agent, "provider", None) if agent else None,
             "effort": _effort_label or None,
             "context_length": (getattr(comp, "context_length", 0) or 0) if has_comp else 0,
+            "session_cost_usd": _session_cost_usd,
         }
         compacted_in_place, effective_session_id, history_offset = self._sync_session_after_run(agent_history)
         # failure_reason must survive the empty-response path too (TUI billing, transient-failure

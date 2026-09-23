@@ -1658,9 +1658,10 @@ class GatewayTurnMixin:
                 context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                 context_length=agent_result.get("context_length") or None,
                 cwd=_terminal_scope_cwd(""), turn_seconds=_turn_seconds,
-requested_model=agent_result.get("requested_model"),
+                requested_model=agent_result.get("requested_model"),
                 served_model=agent_result.get("served_model"),
                 reasoning_effort=agent_result.get("effort"),
+                session_cost_usd=agent_result.get("session_cost_usd"),
                 profile=self._footer_profile_label(source),
             )
         except Exception as _footer_err:
