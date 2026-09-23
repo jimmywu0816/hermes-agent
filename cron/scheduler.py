@@ -2569,22 +2569,22 @@ def run_job(
     _session_db = None
     _audit: Optional[_FireAudit] = None
     _worker_state: dict = {}
-    scope = _CronRunScope(job, job_id, execution_id)
+    scope = None
     try:
-        scope.enter()
-        if scope.workdir:
-            logger.info("Job '%s': using task-scoped workdir %s", job_id, scope.workdir)
-
-        # Stale-code guard (WO-D-2026-09-23-009-08): if the checkout changed while this run was
-        # pending (long pre-run script crossing the update window), abort BEFORE the first lazy
-        # import of the agent chain — importing run_agent/agent_init from a stale process against
-        # the new on-disk code IS the mixed-code hazard, and an import that fails there would
-        # bypass this guard entirely (leaving the old, indistinguishable ImportError). The raise
-        # stays inside this try so the round still goes through the normal failure bookkeeping.
+        # Stale-code guard (WO-D-2026-09-23-009-08): run this BEFORE any runtime setup — scope
+        # entry, lazy imports, dotenv reload — because a stale process importing the agent chain
+        # against new on-disk code is the very hazard this guard exists for, and an import that
+        # fails there would bypass the guard entirely. The raise stays inside this try so the
+        # round keeps the normal failure bookkeeping below.
         _stale_reason = _stale_code_abort_reason(_code_at_start)
         if _stale_reason:
             logger.warning("Job '%s' (ID: %s): %s", job_name, job_id, _stale_reason)
             raise RuntimeError(_stale_reason)
+
+        scope = _CronRunScope(job, job_id, execution_id)
+        scope.enter()
+        if scope.workdir:
+            logger.info("Job '%s': using task-scoped workdir %s", job_id, scope.workdir)
 
         from run_agent import AIAgent
         _reload_dotenv_and_publish_delivery_target(job)
@@ -2652,7 +2652,8 @@ def run_job(
         from cron.scheduler_detached_worker import defer_teardown_to_running_worker
         _worker_teardown_deferred = defer_teardown_to_running_worker(
             _worker_state.get("future"), _session_db, agent, job_id, job_name, _cron_session_id)
-        scope.exit()
+        if scope is not None:  # the stale-code guard can abort before the run scope exists
+            scope.exit()
         if _session_db and not _worker_teardown_deferred:
             _finalize_cron_session(_session_db, agent, job_id, job_name, _cron_session_id)
         # Tear down the ephemeral agent or the gateway leaks fds per tick (EMFILE). With deferred

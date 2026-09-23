@@ -197,8 +197,10 @@ def test_run_job_aborts_before_constructing_agent_on_code_change(tmp_path):
 
 
 def test_run_job_probe_order_and_no_setup_before_check(tmp_path):
-    """Order guarantee (WO-009-08 必改 #1): first probe → pre-run script → second probe → abort,
-    with no runtime setup or lazy agent import happening before the check."""
+    """Order guarantee (WO-009-08 必改 #1/#4): first probe → pre-run script → second probe → abort,
+    with NO runtime setup or lazy agent import happening before the check."""
+    import sys
+
     job = {"id": "stale-order", "name": "order test", "prompt": "hello", "script": "prerun.py"}
     order = []
     fingerprints = iter([_START, _CHANGED])
@@ -218,17 +220,31 @@ def test_run_job_probe_order_and_no_setup_before_check(tmp_path):
          patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=_RUNTIME), \
          patch("cron.scheduler._repo_code_fingerprint", side_effect=probe), \
          patch("cron.scheduler._run_job_script_with_claim_heartbeat", side_effect=prerun), \
+         patch("cron.scheduler._CronRunScope") as scope_cls, \
+         patch("cron.scheduler._load_cron_job_config") as load_cfg, \
+         patch("cron.scheduler._resolve_cron_agent_setup") as resolve_setup, \
          patch("cron.scheduler._reload_dotenv_and_publish_delivery_target") as reload_hook, \
          patch("cron.scheduler._open_cron_session_db") as open_db, \
          patch("cron.scheduler._construct_cron_agent") as construct:
-        success, output, final_response, error = run_job(job)
+        saved_run_agent = sys.modules.pop("run_agent", None)
+        try:
+            success, output, final_response, error = run_job(job)
+            run_agent_imported = "run_agent" in sys.modules
+        finally:
+            if saved_run_agent is not None:
+                sys.modules["run_agent"] = saved_run_agent
 
     assert order == ["probe", "prerun", "probe"]
     assert success is False
     assert error and "Stale cron worker aborted" in error
-    construct.assert_not_called()
-    open_db.assert_not_called()
-    reload_hook.assert_not_called()  # nothing in the run path ran before the check
+    # Nothing in the run path may execute before the check:
+    scope_cls.assert_not_called()        # no run-scope creation/entry
+    load_cfg.assert_not_called()         # no cron job config load
+    resolve_setup.assert_not_called()    # no provider/runtime resolution
+    reload_hook.assert_not_called()      # no dotenv reload
+    open_db.assert_not_called()          # no state.db
+    construct.assert_not_called()        # no agent construction
+    assert run_agent_imported is False   # the lazy `from run_agent import AIAgent` did not run
 
 
 def test_run_job_constructs_normally_when_fingerprint_unchanged(tmp_path):
