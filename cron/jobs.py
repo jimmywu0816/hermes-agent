@@ -1701,6 +1701,8 @@ _UPDATE_FIELD_NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
     "monitor_script": _normalize_job_optional_text,
     "monitor_url": _normalize_job_optional_text,
     "reasoning_effort": _normalize_reasoning_effort,
+    # B-pilot: per-job system-prompt catalog trim (update-only; see cron/AGENTS.md follow-up).
+    "trim_skills_catalog": bool,
 }
 
 

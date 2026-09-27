@@ -1287,6 +1287,27 @@ def build_skills_system_prompt(
             reset_hermes_home_override(_home_token)
 
 
+def trim_available_skills_block(text: str) -> str:
+    """Drop the rendered ``<available_skills>`` … ``</available_skills>`` catalog.
+
+    The block's own lines (both labels, each with its line terminator) are removed;
+    every other character is returned untouched, so a caller that trims after
+    :func:`build_skills_system_prompt` cannot influence the shared skills caches.
+    No block (or empty input) returns *text* unchanged.
+    """
+    if not text:
+        return text
+    lines = text.splitlines(keepends=True)
+    start = None
+    for i, line in enumerate(lines):
+        if start is None:
+            if line.strip() == "<available_skills>":
+                start = i
+        elif line.strip() == "</available_skills>":
+            return "".join(lines[:start]) + "".join(lines[i + 1:])
+    return text
+
+
 def _entry_name(entry: dict) -> str:
     return entry.get("frontmatter_name") or entry.get("skill_name") or ""
 

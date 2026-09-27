@@ -21,6 +21,7 @@ from agent.prompt_builder import (
     _strip_yaml_frontmatter,
     build_skills_system_prompt,
     build_context_files_prompt,
+    trim_available_skills_block,
     CONTEXT_FILE_MAX_CHARS,
     _dynamic_context_file_max_chars,
     _get_context_file_max_chars,
@@ -1295,3 +1296,53 @@ class TestContextFileReadTimeout:
 
         with pytest.raises(FileNotFoundError):
             _read_text_with_timeout(tmp_path / "missing.md", timeout=1.0)
+
+
+# =========================================================================
+# Catalog trim (B-pilot per-job prompt slimming)
+# =========================================================================
+
+
+class TestTrimAvailableSkillsBlock:
+    """Contract: delete the ``<available_skills>`` catalog, touch nothing else."""
+
+    FULL = (
+        "## Skills\n"
+        "Before replying, scan the skills below.\n"
+        "\n"
+        "<available_skills>\n"
+        "  general:\n"
+        "    - alpha: Alpha skill does A\n"
+        "</available_skills>\n\n"
+        "Only proceed without loading a skill if genuinely none are relevant to the task."
+    )
+
+    def test_removes_block_and_keeps_surrounding_prose(self):
+        trimmed = trim_available_skills_block(self.FULL)
+        assert "<available_skills>" not in trimmed
+        assert "</available_skills>" not in trimmed
+        assert "Alpha skill does A" not in trimmed
+        assert trimmed.startswith("## Skills\n")
+        assert trimmed.endswith(
+            "Only proceed without loading a skill if genuinely none are relevant to the task."
+        )
+
+    def test_is_a_pure_byte_deletion(self):
+        # Only the block lines leave; nothing is reflowed, stripped or re-encoded.
+        assert trim_available_skills_block(
+            "A\n<available_skills>\n  x: y\n</available_skills>\n\nB"
+        ) == "A\n\nB"
+
+    def test_no_block_is_returned_verbatim(self):
+        for text in ("", "## Skills\nno catalog here", "   "):
+            assert trim_available_skills_block(text) == text
+
+    def test_unclosed_block_is_returned_verbatim(self):
+        text = "<available_skills>\n  x: y\n"
+        assert trim_available_skills_block(text) == text
+
+    def test_idempotent(self):
+        once = trim_available_skills_block(
+            "<available_skills>\n  x: y\n</available_skills>\n\nTail"
+        )
+        assert trim_available_skills_block(once) == once

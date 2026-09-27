@@ -2378,7 +2378,7 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
 def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup, *, workdir, session_id, session_db):
     runtime = setup.runtime
     pr = _cfg.get("provider_routing") or {}
-    return AIAgent(
+    agent = AIAgent(
         model=setup.model,
         api_key=runtime.get("api_key"),
         base_url=runtime.get("base_url"),
@@ -2410,6 +2410,12 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         session_id=session_id,
         session_db=session_db,
     )
+    # Per-job prefix slimming (B pilot): skills stay loadable; only the catalog block is dropped.
+    # Attach post-construction (same convention as `_end_session_on_close` below) so AIAgent's
+    # ~60-parameter signature stays untouched and every other cron job is unaffected.
+    if job.get("trim_skills_catalog"):
+        agent._trim_skills_catalog = True
+    return agent
 
 
 class _FireAudit:
