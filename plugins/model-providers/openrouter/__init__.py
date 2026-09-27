@@ -1,6 +1,8 @@
 """OpenRouter provider profile."""
 
 import logging
+import math
+from decimal import Decimal
 from typing import Any
 
 from agent.portal_tags import get_affinity_scope, get_conversation_context
@@ -118,6 +120,38 @@ class OpenRouterProfile(ProviderProfile):
         if result is not None:
             _CACHE = result
         return result
+
+    def get_usage_cost(self, model: str, usage: Any) -> Any | None:
+        """Return the actual per-request cost OpenRouter reports inline.
+
+        OpenRouter embeds ``usage.cost`` (credits/USD) in every response; it is
+        the amount actually charged for that request. Under BYOK this covers only
+        OpenRouter's fee — the upstream inference cost is itemized separately in
+        ``usage.cost_details`` and is not added here. Returns None when no numeric
+        cost is present (or on any error) so callers fall back to estimation;
+        non-finite values are rejected.
+        """
+        try:
+            from agent.usage_pricing import CostResult, format_cost_label
+
+            raw = getattr(usage, "raw_usage", None)
+            if not isinstance(raw, dict):
+                return None
+            cost = raw.get("cost")
+            # bool subclasses int; a boolean cost is never a real amount. Zero is valid.
+            if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+                return None
+            # +Inf/-Inf/NaN are not real amounts; without this a non-finite float
+            # would pass the type check and poison the actual-cost sum.
+            if not math.isfinite(cost):
+                return None
+            amount = Decimal(str(cost))
+            return CostResult(
+                amount_usd=amount, status="actual", source="provider_cost_api",
+                label=format_cost_label(amount),
+            )
+        except Exception:
+            return None
 
     def build_extra_body(self, *, session_id: str | None = None, **context: Any) -> dict[str, Any]:
         body: dict[str, Any] = {}

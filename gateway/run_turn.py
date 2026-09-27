@@ -1645,6 +1645,28 @@ class GatewayTurnMixin:
         display_reasoning = escape_code_fences_for_display(display_reasoning)
         return f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
 
+    def _footer_profile_label(self, source) -> str:
+        """Resolve the profile name that served this turn (footer ``bot`` field).
+
+        Resolution order mirrors ``_resolve_profile_home_for_source``: ``source.profile``, then
+        profile routing, then the active profile. Never raises; falls back to "default".
+        """
+        try:
+            name = (getattr(source, "profile", "") or "").strip()
+            if name:
+                return name
+            routed = self._profile_name_for_source(source)
+            if routed and str(routed).strip():
+                return str(routed).strip()
+        except Exception:
+            pass
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+
+            return get_active_profile_name() or "default"
+        except Exception:
+            return "default"
+
     def _hmwa_runtime_footer_line(self, agent_result, source, _turn_seconds):
         """Runtime-metadata footer for the FINAL message of the turn; off by default
         (display.runtime_footer.enabled=false)."""
@@ -1653,12 +1675,18 @@ class GatewayTurnMixin:
             from gateway.runtime_footer import build_footer_line as _bfl
             return _bfl(
                 user_config=_load_gateway_config(),
-                platform_key=_platform_config_key(source.platform), model=agent_result.get("model"),
+                platform_key=_platform_config_key(source.platform),
+                provider=agent_result.get("provider"),
+                model=agent_result.get("model"),
                 context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                 context_length=agent_result.get("context_length") or None,
                 cwd=_terminal_scope_cwd(""), turn_seconds=_turn_seconds,
                 requested_model=agent_result.get("requested_model"),
                 served_model=agent_result.get("served_model"),
+                reasoning_effort=agent_result.get("effort"),
+                session_cost_usd=agent_result.get("session_cost_usd"),
+                parallel_children=agent_result.get("parallel_children"),
+                profile=self._footer_profile_label(source),
             )
         except Exception as _footer_err:
             logger.debug("runtime_footer build failed: %s", _footer_err)
@@ -4095,7 +4123,12 @@ class GatewayTurnMixin:
             # the decision inputs ("signal never set" vs "ack-pending race"). Skipped for consumers
             # never fed the final's deltas (interim-only wiring, #105341) — they cannot have raced
             # the normal final send, so the warning would be a guaranteed false positive.
-            logger.warning(
+            # Deliberately DEBUG, not WARNING (WO-D-2026-09-14-019-04 E): under commentary configs
+            # this fired on every turn (zero signal), and commentary must not fold into suppression
+            # (#14238) — the remaining duplicate-content defenses are the origin guard and the
+            # already_sent stream contract; the diagnostic stays available at debug level for the
+            # wecom RCA path.
+            logger.debug(
                 "Normal final-send NOT suppressed despite active stream consumer for session %s: "
                 "streamed=%s previewed=%s content_delivered=%s transformed=%s final_len=%d — "
                 "possible duplicate send (see wecom ack-timeout RCA).",

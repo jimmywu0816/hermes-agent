@@ -13,6 +13,7 @@ import json
 import logging
 import queue
 import re
+import sqlite3
 import threading
 import time
 from contextlib import suppress
@@ -1959,12 +1960,91 @@ class TurnRunner:
         agent = ctx.agent_holder[0]
         has_comp = bool(agent) and hasattr(agent, "context_compressor")
         comp = agent.context_compressor if has_comp else None
+        # T5/T6 (WO-D-2026-09-16-003-01): per-turn provenance for the footer.
+        # ``provider`` comes off the same live agent instance as ``model`` (fallback
+        # switches update agent.provider in place, so it reflects the backend that
+        # actually served the turn). ``effort`` comes from the THIS-turn local
+        # ``reasoning_config`` resolved above — NOT the shared runner slot, which
+        # concurrent foreground/background turns overwrite mid-turn; no re-resolve
+        # at footer time either. "-" means thinking is explicitly disabled.
+        _effort_label = ""
+        if isinstance(reasoning_config, dict):
+            if reasoning_config.get("enabled") is False:
+                _effort_label = "-"
+            else:
+                _effort_label = str(reasoning_config.get("effort") or "").strip()
+        # Session cumulative estimated cost for the footer's opt-in ``cost`` field
+        # (WO-D-2026-09-23-015-01). Primary source = the persisted session row
+        # (``sessions.estimated_cost_usd``, ``actual_cost_usd`` preferred while it is
+        # non-zero), read through the same handle the runner already uses for session rows
+        # (``_current_message_count``): it flushes queued token deltas first, so the figure
+        # includes this turn, and being a DB row it survives gateway restarts. The gateway
+        # SessionEntry deliberately carries no cost (the agent persists usage itself) and
+        # ``agent.session_estimated_cost_usd`` resets with the process, so the live counter
+        # only tops the value up. Any failure degrades to None -> the footer skips the
+        # column; this never raises.
+        _session_cost_usd = None
+        with suppress(Exception):
+            _cost_sources = []
+            _session_db = getattr(self._runner, "_session_db", None)
+            if _session_db is not None and ctx.session_id:
+                # run_sync is off-loop (executor); sync DB is fine.
+                row = _session_db._db.get_session(ctx.session_id) or {}
+                _actual = row.get("actual_cost_usd")
+                _estimated = row.get("estimated_cost_usd")
+                if _actual and float(_actual) > 0:
+                    _cost_sources.append(float(_actual))
+                elif _estimated:
+                    _cost_sources.append(float(_estimated))
+            _in_memory_cost = getattr(agent, "session_estimated_cost_usd", 0.0) if agent else 0.0
+            if _in_memory_cost:
+                _cost_sources.append(float(_in_memory_cost))
+            if _cost_sources:
+                _session_cost_usd = max(_cost_sources)
+        # Live delegated-children count for the footer's opt-in ``parallel`` field
+        # (WO-D-2026-09-23-015-01 T1b): the number of running child agents this profile has
+        # dispatched, i.e. async_delegations rows whose state is still live ('running' /
+        # 'finalizing'), each row weighted by its fan-out width (an is_batch row counts its
+        # task_indexes / goals, a plain row counts 1). Read from THIS profile's state.db
+        # same handle lineage as the session-row reads above) opened read-only; success always
+        # yields an int (0 live rows -> 0, rendered ``並行0``), while any failure degrades to None
+        # and the footer renders ``並行?``; this never raises.
+        _parallel_children = None
+        with suppress(Exception):
+            _par_total = 0
+            _par_handle = getattr(self._runner, "_session_db", None)
+            _par_path = getattr(getattr(_par_handle, "_db", None), "db_path", None)
+            if _par_path is None:
+                _par_path = getattr(_par_handle, "db_path", None) if _par_handle is not None else None
+            if _par_path is None:
+                from hermes_state import _default_db_path
+                _par_path = _default_db_path()
+            _par_conn = sqlite3.connect(f"file:{_par_path}?mode=ro", uri=True)
+            try:
+                _par_conn.execute("PRAGMA query_only=ON")
+                _par_rows = _par_conn.execute(
+                    "SELECT task_json FROM async_delegations WHERE state IN ('running','finalizing')"
+                ).fetchall()
+            finally:
+                _par_conn.close()
+            for (_par_task_json,) in _par_rows:
+                _par_task = json.loads(_par_task_json or "{}")
+                if _par_task.get("is_batch"):
+                    _par_children = _par_task.get("task_indexes") or _par_task.get("goals") or []
+                    _par_total += max(1, len(_par_children))
+                else:
+                    _par_total += 1
+            _parallel_children = _par_total
         usage = {
             "last_prompt_tokens": getattr(comp, "last_prompt_tokens", 0) if has_comp else 0,
             "input_tokens": getattr(agent, "session_prompt_tokens", 0) if has_comp else 0,
             "output_tokens": getattr(agent, "session_completion_tokens", 0) if has_comp else 0,
             "model": getattr(agent, "model", None) if agent else None,
+            "provider": getattr(agent, "provider", None) if agent else None,
+            "effort": _effort_label or None,
             "context_length": (getattr(comp, "context_length", 0) or 0) if has_comp else 0,
+            "session_cost_usd": _session_cost_usd,
+            "parallel_children": _parallel_children,
         }
         compacted_in_place, effective_session_id, history_offset = self._sync_session_after_run(agent_history)
         # failure_reason must survive the empty-response path too (TUI billing, transient-failure

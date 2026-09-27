@@ -905,3 +905,33 @@ class TestConversationStartedTwoLine:
         vol = self._volatile(agent)
         assert "Conversation started:" not in vol
         assert "as of the last context rebuild" not in vol
+
+
+def test_skills_prompt_trims_catalog_only_when_agent_flag_is_set():
+    """A per-job ``_trim_skills_catalog`` drops the catalog block after the builder
+    returns, so the shared skills cache keeps serving the full index to other sessions."""
+    from agent.system_prompt import _skills_prompt
+
+    full = (
+        "## Skills\nprose\n\n"
+        "<available_skills>\n  general:\n    - alpha: Alpha\n</available_skills>\n\n"
+        "Only proceed without loading a skill if genuinely none are relevant to the task."
+    )
+
+    def _agent(**overrides):
+        base = dict(valid_tool_names={"skill_view"}, platform="", _session_db=None)
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    with (
+        patch("agent.prompt_builder.build_skills_system_prompt", return_value=full),
+        patch("model_tools.get_toolset_for_tool", return_value="skills"),
+        patch("agent.coding_context.coding_compact_skill_categories", return_value=frozenset()),
+    ):
+        untrimmed = _skills_prompt(_agent())
+        trimmed = _skills_prompt(_agent(_trim_skills_catalog=True))
+
+    assert "<available_skills>" in untrimmed
+    assert "<available_skills>" not in trimmed
+    assert trimmed.startswith("## Skills")
+    assert "Only proceed without loading a skill" in trimmed
