@@ -1742,6 +1742,49 @@ def _normalize_reasoning_effort(value: Any) -> Optional[str]:
     return text
 
 
+# ---------------------------------------------------------------------------
+# Fleet delivery-policy governance (D-2026-09-18-054): new jobs carry a
+# ``delivery_policy`` tag derived from the resolved ``deliver`` value at
+# creation time. Vocabulary + channel mapping mirror the fleet lint
+# (~/.hermes/scripts/cron_delivery_lint.py ALLOWED_POLICIES / channel regexes)
+# — keep the two in sync when the lint's channel allowlist grows; the lint's
+# policy↔deliver cross-check remains the final arbiter. Unmanaged targets
+# (origin, telegram:*, unknown channels) derive nothing: the record stays
+# policy-less and the lint flags it (governance visibility over guessing).
+DELIVERY_POLICY_VALUES = ("local", "slack_report", "slack_alert", "slack_project")
+_DELIVERY_POLICY_REPORT_CHANNEL = "C0BUKBA6LBE"  # ops-reports (lint requires a thread suffix)
+_DELIVERY_POLICY_ALERT_CHANNEL = "C0BU1JH6XDM"   # ops-alerts
+# SYNC: must mirror PROJECT_CHANNELS in ~/.hermes/scripts/cron_delivery_lint.py
+# (fleet-side allowlist; changes to either side require owner-approved expansion —
+# dual-source by design, keep in lockstep. See D-2026-09-18-060⑥ / D-2026-09-18-067.)
+_DELIVERY_POLICY_PROJECT_CHANNELS = frozenset({
+    "C0BULDX38KT", "C0BU34THG5V", "C0BTX66N963", "C0BUS68P7P1",
+    "C0C1EG4TNNN", "C0C1GFMN0E5", "C0BUCJ2SJGK", "C0BUE6N6AS1",
+    "C0BUK7C8JAW", "C0BVBTDK6NL",
+})
+
+
+def derive_delivery_policy(deliver: Optional[str]) -> Optional[str]:
+    """Map a resolved ``deliver`` value to the fleet's delivery_policy vocabulary."""
+    if not deliver or "," in deliver:
+        return None
+    if deliver == "local":
+        return "local"
+    if not deliver.startswith("slack:"):
+        return None
+    channel = deliver[len("slack:"):].split(":", 1)[0]
+    if channel == _DELIVERY_POLICY_REPORT_CHANNEL:
+        # Lint requires a thread suffix for #ops-reports deliveries; a bare channel
+        # target would derive a policy the lint then rejects — stay policy-less and
+        # let the lint surface it instead (WO-D-2026-09-18-067-01).
+        return "slack_report" if ":" in deliver[len("slack:"):] else None
+    if channel == _DELIVERY_POLICY_ALERT_CHANNEL:
+        return "slack_alert"
+    if channel in _DELIVERY_POLICY_PROJECT_CHANNELS:
+        return "slack_project"
+    return None
+
+
 # Normalizers for create_job (all fields) / update_job (present fields). Invalid values raise BEFORE
 # storing.
 _CREATE_FIELD_NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
@@ -1764,6 +1807,8 @@ _UPDATE_FIELD_NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
     "monitor_url": _normalize_job_optional_text,
     "interpreter": _normalize_job_optional_text,
     "reasoning_effort": _normalize_reasoning_effort,
+    # B-pilot: per-job system-prompt catalog trim (update-only; see cron/AGENTS.md follow-up).
+    "trim_skills_catalog": bool,
 }
 
 
@@ -1831,6 +1876,7 @@ def create_job(
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[str] = None,
+    delivery_policy: Optional[str] = None,
     paused: bool = False,
     paused_reason: Optional[str] = None,
     pinned: bool = False,
@@ -1839,6 +1885,9 @@ def create_job(
     """Create a new cron job and return the stored record.
 
     deliver defaults to "origin" when ``origin`` is given, else "local"; repeat None = forever.
+    delivery_policy: fleet governance tag; omitted => auto-derived from the resolved deliver
+    (local/slack_report/slack_alert/slack_project; unmanaged targets stay policy-less for the
+    fleet lint to flag). An explicit invalid value raises before persisting.
     script: stdout is injected as prompt context, or with ``no_agent=True`` IS the job (stdout
     delivered verbatim, requires ``script``). context_from: job id(s) whose latest output is
     injected. workdir: absolute cwd for tools/scripts. monitor_script/monitor_url: cheap monitor
@@ -1861,6 +1910,21 @@ def create_job(
         repeat = 1
     if deliver is None:
         deliver = "origin" if origin else "local"
+    if delivery_policy is None:
+        delivery_policy = derive_delivery_policy(deliver)
+    else:
+        if delivery_policy not in DELIVERY_POLICY_VALUES:
+            raise ValueError(
+                f"delivery_policy must be one of {', '.join(DELIVERY_POLICY_VALUES)} "
+                f"(got {delivery_policy!r}); omit it to auto-derive from deliver.")
+        # Cross-check (WO-D-2026-09-18-067-01): an explicit policy must agree with the
+        # derived one. Unmanaged targets (derived None) keep the conscious-choice path —
+        # the lint remains the governance signal there, not a hard reject.
+        derived = derive_delivery_policy(deliver)
+        if derived is not None and delivery_policy != derived:
+            raise ValueError(
+                f"delivery_policy={delivery_policy!r} conflicts with deliver={deliver!r} "
+                f"(derived: {derived!r}); omit the field to auto-derive, or fix the mismatch.")
     job_id = uuid.uuid4().hex[:12]
     now = _hermes_now().isoformat()
 
@@ -1931,6 +1995,7 @@ def create_job(
     for key, value in (
         ("attach_to_session", normalized_attach), ("reasoning_effort", normalized_reasoning_effort),
         ("failure_deliver", f["failure_deliver"]), ("interpreter", f["interpreter"]),
+        ("delivery_policy", delivery_policy),
     ):
         if value is not None:
             job[key] = value
@@ -2030,6 +2095,29 @@ def _normalize_job_updates(job: Dict[str, Any], updates: Dict[str, Any]) -> None
     for key, norm in _UPDATE_FIELD_NORMALIZERS.items():
         if key in updates:
             updates[key] = norm(updates[key])
+    if "delivery_policy" in updates:
+        _policy = updates["delivery_policy"]
+        if _policy is not None and _policy not in DELIVERY_POLICY_VALUES:
+            raise ValueError(
+                f"delivery_policy must be one of {', '.join(DELIVERY_POLICY_VALUES)} "
+                f"(got {_policy!r}); omit the field to keep the stored value.")
+        if _policy not in (None, ""):
+            # Cross-check (WO-D-2026-09-18-067-01): an explicit policy must agree with
+            # the deliver value in effect after the merge; unmanaged targets (derived
+            # None) stay lint-governed rather than hard-rejected. None/'' = clear.
+            _effective_deliver = updates.get("deliver", job.get("deliver"))
+            _derived = derive_delivery_policy(_effective_deliver)
+            if _derived is not None and _policy != _derived:
+                raise ValueError(
+                    f"delivery_policy={_policy!r} conflicts with deliver={_effective_deliver!r} "
+                    f"(derived: {_derived!r}); omit the field to keep the stored value, "
+                    "or fix the mismatch.")
+    elif "deliver" in updates:
+        # Deliver retargeted without an explicit policy: re-derive when the new target
+        # is managed; unmanaged targets keep the stored policy for the lint to flag.
+        _derived = derive_delivery_policy(updates["deliver"])
+        if _derived is not None:
+            updates["delivery_policy"] = _derived
     if "repeat" in updates:
         _rp = updates["repeat"]
         completed = (job.get("repeat") or {}).get("completed", 0)
