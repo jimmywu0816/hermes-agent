@@ -3637,6 +3637,35 @@ class _ExternalWorkerPostHandoffError(RuntimeError):
     """The waiter failed after the worker was spawned and may own the execution."""
 
 
+# T2-B: grace for a worker that is still in final teardown before its scope is reaped.
+# The ledger row is already terminal, so killing the scope only ends teardown, never
+# the durable execution record.
+_CRON_SCOPE_EXIT_GRACE_SECONDS = 15.0
+
+
+def _reap_external_worker_scope(process: subprocess.Popen, scope_unit: str) -> None:
+    """Reclaim a terminal cron worker's transient user scope and any cgroup residue.
+
+    ``systemd-run --scope --collect`` only collects an *empty* scope. A daemon the job
+    spawned (e.g. ``adb -L tcp:5037 fork-server server``) or a worker wedged in
+    ``futex_do_wait`` keeps the cgroup populated, so the unit stays active forever and
+    leaks RAM (#ops-alerts 09-19/09-20/09-21 recurrence; T2-B). The waiter is the only
+    owner that knows both the wrapper pid and the unit name, so it reclaims here:
+    wait a short grace for a normal exit, then ``systemctl --user stop`` (SIGTERM all)
+    and force-kill survivors (``tools.process_registry._stop_systemd_unit``).
+    """
+    deadline = time.monotonic() + _CRON_SCOPE_EXIT_GRACE_SECONDS
+    while process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.25)
+    try:
+        from tools.process_registry import _stop_systemd_unit
+
+        if not _stop_systemd_unit(scope_unit):
+            logger.warning("Cron worker scope %s could not be confirmed reaped", scope_unit)
+    except Exception:
+        logger.debug("Could not reap cron worker scope %s", scope_unit, exc_info=True)
+
+
 def _wait_for_external_cron_worker(
     process: subprocess.Popen,
     *,
@@ -3644,6 +3673,7 @@ def _wait_for_external_cron_worker(
     job_id: Optional[str] = None,
     handoff_files: tuple[Path, ...] = (),
     stderr_path: Optional[Path] = None,
+    scope_unit: str = "",
 ) -> bool:
     try:
         return _wait_for_external_cron_worker_body(
@@ -3652,6 +3682,11 @@ def _wait_for_external_cron_worker(
     except Exception as wait_error:
         raise _ExternalWorkerPostHandoffError(str(wait_error)) from wait_error
     finally:
+        # T2-B: a completed/hung external worker must not leave its transient scope
+        # (and any daemon inside it) behind. Runs for success, failure and the
+        # terminal-but-still-live path alike.
+        if scope_unit:
+            _reap_external_worker_scope(process, scope_unit)
         if job_id is not None:
             with _running_lock:
                 _restart_safe_waiter_job_ids.discard(_inflight_key(job_id))
@@ -3716,11 +3751,16 @@ def _launch_external_cron_worker(job: dict) -> bool:
         )
     except Exception:
         require_restart_safe_scope = False
+    unit_suffix = f"cron-{job_id}-exec-{execution_id}"
     dispatch = restart_safe_gateway_child_argv(
         command,
-        unit_suffix=f"cron-{job_id}-exec-{execution_id}",
+        unit_suffix=unit_suffix,
         require_restart_safe_scope=require_restart_safe_scope,
     )
+    # T2-B: the transient scope this dispatch owns ("" when it degraded to a direct
+    # subprocess). The waiter reclaims it — and any daemon left in its cgroup — once the
+    # execution is terminal, so a completed job cannot pin the scope forever.
+    scope_unit = f"hermes-worker-{unit_suffix}.scope" if dispatch.mode == "scoped" else ""
     if dispatch.mode == "in_process":
         return False
 
@@ -3828,6 +3868,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
                     job_id=job_id,
                     handoff_files=(payload_path, stderr_path),
                     stderr_path=stderr_path,
+                    scope_unit=scope_unit,
                 )
             finally:
                 ack_path.unlink(missing_ok=True)
@@ -3846,6 +3887,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
                     job_id=job_id,
                     handoff_files=(payload_path, stderr_path),
                     stderr_path=stderr_path,
+                    scope_unit=scope_unit,
                 )
             logger.info(
                 "Cron job '%s' handed to restart-safe worker pid=%s execution=%s",
@@ -3862,6 +3904,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
                 job_id=job_id,
                 handoff_files=(payload_path, stderr_path),
                 stderr_path=stderr_path,
+                scope_unit=scope_unit,
             )
         returncode = process.poll()
         if returncode is not None:
@@ -3902,6 +3945,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
         job_id=job_id,
         handoff_files=(payload_path, ack_path, stderr_path),
         stderr_path=stderr_path,
+        scope_unit=scope_unit,
     )
 
 
