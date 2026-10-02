@@ -241,6 +241,10 @@ def record_response_usage(
         if _moa_cost is not None:
             agent.session_estimated_cost_usd += _moa_cost
             _cost_delta = (_cost_delta or 0.0) + _moa_cost
+    # Only a provider-reported actual cost may feed actual_cost_usd. MoA advisor
+    # spend is still estimated; mixing it in would corrupt the actual total, so
+    # MoA turns conservatively fall back to estimated-only.
+    _actual_delta = _cost_delta if (cost_result.status == "actual" and _moa_ref_cost is None) else None
     agent.session_cost_status = cost_result.status
     agent.session_cost_source = cost_result.source
 
@@ -263,6 +267,7 @@ def record_response_usage(
                 cache_write_tokens=canonical_usage.cache_write_tokens,
                 reasoning_tokens=canonical_usage.reasoning_tokens,
                 estimated_cost_usd=_cost_delta,
+                actual_cost_usd=_actual_delta,
                 cost_status=cost_result.status,
                 cost_source=cost_result.source,
                 billing_provider=agent.provider,

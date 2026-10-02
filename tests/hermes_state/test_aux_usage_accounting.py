@@ -5,6 +5,7 @@ their token usage into session_model_usage with a ``task`` dimension via
 the ambient accounting context (agent/aux_accounting.py), making aux model
 spend visible in analytics.
 """
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -95,6 +96,77 @@ class TestRecordAuxiliaryUsage:
         rows = _usage_rows(db, "s1")
         tasks = sorted(r["task"] for r in rows)
         assert tasks == ["", "title_generation"]
+
+
+
+
+class TestAuxActualCostPlumbing:
+    def test_record_auxiliary_usage_persists_actual_cost(self, db):
+        db.create_session("s1", source="cli")
+        db.record_auxiliary_usage(
+            "s1", "vision", model="m", billing_provider="openrouter",
+            input_tokens=10, output_tokens=1,
+            estimated_cost_usd=0.002, actual_cost_usd=0.0015,
+            cost_status="actual", cost_source="provider_cost_api",
+        )
+        rows = _usage_rows(db, "s1")
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["estimated_cost_usd"] == 0.002
+        assert r["actual_cost_usd"] == 0.0015
+        assert r["cost_status"] == "actual"
+        assert r["cost_source"] == "provider_cost_api"
+
+    def test_record_aux_usage_forwards_actual_status_and_source(self, db, monkeypatch):
+        from agent.aux_accounting import (
+            record_aux_usage,
+            reset_accounting_context,
+            set_accounting_context,
+        )
+        from agent.usage_pricing import CostResult
+
+        def _fake_estimate(model, usage, *, provider=None, base_url=None, api_key=None):
+            return CostResult(amount_usd=Decimal("0.0015"), status="actual",
+                              source="provider_cost_api", label="~$0.0015")
+
+        monkeypatch.setattr("agent.usage_pricing.estimate_usage_cost", _fake_estimate)
+        db.create_session("s1", source="cli")
+        token = set_accounting_context(db, "s1")
+        try:
+            record_aux_usage(_mk_response(model="aux-m"), "vision", provider="openrouter")
+        finally:
+            reset_accounting_context(token)
+        rows = _usage_rows(db, "s1")
+        assert len(rows) == 1
+        assert rows[0]["actual_cost_usd"] == 0.0015
+        assert rows[0]["estimated_cost_usd"] == 0.0015
+        assert rows[0]["cost_status"] == "actual"
+        assert rows[0]["cost_source"] == "provider_cost_api"
+
+    def test_record_aux_usage_omits_actual_for_estimated(self, db, monkeypatch):
+        from agent.aux_accounting import (
+            record_aux_usage,
+            reset_accounting_context,
+            set_accounting_context,
+        )
+        from agent.usage_pricing import CostResult
+
+        def _fake_estimate(model, usage, *, provider=None, base_url=None, api_key=None):
+            return CostResult(amount_usd=Decimal("0.002"), status="estimated",
+                              source="official_docs_snapshot", label="~$0.002")
+
+        monkeypatch.setattr("agent.usage_pricing.estimate_usage_cost", _fake_estimate)
+        db.create_session("s1", source="cli")
+        token = set_accounting_context(db, "s1")
+        try:
+            record_aux_usage(_mk_response(model="aux-m"), "vision", provider="openrouter")
+        finally:
+            reset_accounting_context(token)
+        rows = _usage_rows(db, "s1")
+        assert len(rows) == 1
+        assert rows[0]["actual_cost_usd"] == 0.0
+        assert rows[0]["estimated_cost_usd"] == 0.002
+        assert rows[0]["cost_status"] == "estimated"
 
 
 

@@ -300,7 +300,11 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
 
 def _skills_prompt(agent: Any) -> str:
     """Skills index (empty without skills tools).  Focus mode demotes non-coding
-    categories to names-only — never hidden, every name stays visible."""
+    categories to names-only — never hidden, every name stays visible.
+
+    A per-job ``agent._trim_skills_catalog`` drops the ``<available_skills>`` block
+    AFTER the shared build returns, so the two skills caches keep serving the full
+    index to every other session (the trim never enters ``cache_key``)."""
     if not any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage']):
         return ""
     import model_tools
@@ -310,8 +314,11 @@ def _skills_prompt(agent: Any) -> str:
         _compact_cats = coding_compact_skill_categories(platform=agent.platform, cwd=resolve_context_cwd())
     except Exception:
         _compact_cats = frozenset()
-    return _pb.build_skills_system_prompt(available_tools=agent.valid_tool_names, available_toolsets=avail_toolsets,
-                                         compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent))
+    text = _pb.build_skills_system_prompt(available_tools=agent.valid_tool_names, available_toolsets=avail_toolsets,
+                                          compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent))
+    if text and getattr(agent, "_trim_skills_catalog", False):
+        text = _pb.trim_available_skills_block(text)
+    return text
 
 
 def _auto_load_parts(agent: Any) -> List[str]:

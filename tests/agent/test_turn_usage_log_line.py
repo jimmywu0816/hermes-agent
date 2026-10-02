@@ -64,3 +64,64 @@ def test_forensics_parser_reads_the_new_fields(tmp_path):
     assert [c["n"] for c in calls] == [3, 4]
     assert calls[0]["write"] == 28604 and calls[0]["id"] == "gen-1788636728-qMa1" and calls[0]["upstream"] == "Claude Platform on AWS"
     assert "write" not in calls[1] and "id" not in calls[1]
+
+
+class TestActualCostRouting:
+    """Only a provider-reported actual cost reaches ``actual_cost_usd``; estimated
+    routes pass None so the consumer keeps falling back to the estimate."""
+
+    @staticmethod
+    def _capture_queue(a, monkeypatch):
+        captured = {}
+
+        class _FakeDB:
+            def queue_token_counts(self, session_id, **kw):
+                captured.update(kw)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(a, "_session_db", _FakeDB())
+        monkeypatch.setattr(a, "_session_db_created", True)
+        return captured
+
+    @staticmethod
+    def _run(a, resp):
+        from agent import turn_usage
+        turn_usage.record_response_usage(
+            a, resp, messages=[{"role": "user", "content": "hi"}], api_call_count=1,
+            api_duration=0.2, compression_attempts=0, max_compression_attempts=3)
+
+    def test_actual_status_writes_actual_cost(self, tmp_path, monkeypatch):
+        from decimal import Decimal
+        from agent import turn_usage
+        from agent.usage_pricing import CostResult
+
+        a = _agent(tmp_path, monkeypatch)
+        captured = self._capture_queue(a, monkeypatch)
+        monkeypatch.setattr(turn_usage, "estimate_usage_cost", lambda *args, **kwargs: CostResult(
+            amount_usd=Decimal("0.0015"), status="actual", source="provider_cost_api", label="~$0.0015"))
+        try:
+            self._run(a, SimpleNamespace(usage=_usage(0, 0, 100), model="anthropic/claude-fable-5.1"))
+        finally:
+            a.close()
+        assert captured["actual_cost_usd"] == 0.0015
+        assert captured["estimated_cost_usd"] == 0.0015
+        assert captured["cost_status"] == "actual"
+
+    def test_estimated_status_writes_no_actual_cost(self, tmp_path, monkeypatch):
+        from decimal import Decimal
+        from agent import turn_usage
+        from agent.usage_pricing import CostResult
+
+        a = _agent(tmp_path, monkeypatch)
+        captured = self._capture_queue(a, monkeypatch)
+        monkeypatch.setattr(turn_usage, "estimate_usage_cost", lambda *args, **kwargs: CostResult(
+            amount_usd=Decimal("0.002"), status="estimated", source="official_docs_snapshot", label="~$0.002"))
+        try:
+            self._run(a, SimpleNamespace(usage=_usage(0, 0, 100), model="anthropic/claude-fable-5.1"))
+        finally:
+            a.close()
+        assert captured["actual_cost_usd"] is None
+        assert captured["estimated_cost_usd"] == 0.002
+        assert captured["cost_status"] == "estimated"

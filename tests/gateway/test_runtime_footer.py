@@ -279,3 +279,243 @@ def test_format_footer_served_model_is_opt_in_and_skips_same_model():
     assert format_runtime_footer(
         model="gpt-5.4", context_tokens=0, context_length=None, cwd="/x",
         served_model=None, fields=["served_model"]) == ""
+
+
+
+# ---------------------------------------------------------------------------
+# Opt-in provenance fields: bot / provider / effort (T5–T7, WO-D-2026-09-16-003-01)
+# ---------------------------------------------------------------------------
+
+def test_format_footer_five_column_renders_in_configured_order():
+    out = format_runtime_footer(
+        bot="it", provider="openrouter", reasoning_effort="max",
+        model="openrouter/z-ai/glm-5.3", context_tokens=68000, context_length=100000,
+        fields=("bot", "provider", "model", "effort", "context_pct"),
+    )
+    assert out == "it · openrouter · glm-5.3 · max · 68%"
+
+
+def test_provenance_fields_never_in_default_fields():
+    # Even with values supplied, an unset ``fields`` (the default set) renders
+    # byte-stably as before — the new fields are opt-in only.
+    monkeyless = format_runtime_footer(
+        bot="it", provider="openrouter", reasoning_effort="max",
+        model="openai/gpt-5.4", context_tokens=68000, context_length=100000,
+    )
+    assert monkeyless == "gpt-5.4 · 68%"
+    assert resolve_footer_config({})["fields"] == ["model", "context_pct", "cwd"]
+
+
+@pytest.mark.parametrize("provider", [None, "", "   "])
+def test_provider_missing_or_empty_skipped(provider):
+    out = format_runtime_footer(
+        provider=provider, model="openai/gpt-5.4", context_tokens=68000,
+        context_length=100000, fields=("provider", "model", "context_pct"),
+    )
+    assert out == "gpt-5.4 · 68%"
+
+
+def test_effort_renders_dash_when_disabled_and_skips_when_unset():
+    assert "-" in format_runtime_footer(
+        reasoning_effort="-", model="m", context_tokens=1, context_length=10,
+        fields=("effort",),
+    )
+    for unset in (None, "", "  "):
+        assert format_runtime_footer(
+            reasoning_effort=unset, model="m", context_tokens=1, context_length=10,
+            fields=("effort", "model"),
+        ) == "m"
+
+
+def test_build_footer_line_bot_name_override_wins():
+    out = build_footer_line(
+        user_config={"display": {"runtime_footer": {"enabled": True, "fields": ["bot"],
+                                                    "bot_name": "custom-label"}}},
+        platform_key="slack", profile="resolved-profile", provider="openrouter",
+        model="openai/gpt-5.4", context_tokens=68000, context_length=100000,
+    )
+    assert out == "custom-label"
+
+
+def test_build_footer_line_profile_passthrough_and_effort():
+    out = build_footer_line(
+        user_config={"display": {"runtime_footer": {
+            "enabled": True, "fields": ["bot", "provider", "model", "effort"]}}},
+        platform_key="slack", profile="finance", provider="openrouter",
+        reasoning_effort="high", model="openai/gpt-5.4",
+        context_tokens=68000, context_length=100000,
+    )
+    assert out == "finance · openrouter · gpt-5.4 · high"
+
+
+def test_build_footer_line_defaults_byte_stable_with_new_kwargs():
+    # Passing the new kwargs while ``fields`` stays default changes nothing.
+    out = build_footer_line(
+        user_config={"display": {"runtime_footer": {"enabled": True}}},
+        platform_key="discord", profile="it", provider="openrouter",
+        reasoning_effort="max", model="openai/gpt-5.4",
+        context_tokens=50_247, context_length=1_000_000, cwd="/var/data",
+    )
+    assert out == "gpt-5.4 · 5% · /var/data"
+
+
+# ---------------------------------------------------------------------------
+# cost — opt-in session cumulative estimated cost (WO-D-2026-09-23-015-01)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "cost,expected",
+    [
+        (0.00042, "≈$0.0004"),   # < $0.01: 4 decimals
+        (0.175, "≈$0.175"),      # < $1: 3 decimals
+        (1.2345, "≈$1.23"),      # >= $1: 2 decimals
+    ],
+)
+def test_format_footer_cost_precision_bands(cost, expected):
+    out = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        session_cost_usd=cost, fields=("cost",),
+    )
+    assert out == expected
+
+
+def test_format_footer_cost_none_skips_field():
+    """Unmeasured cost (None) drops the whole column — never a ``$?`` artifact."""
+    out = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        session_cost_usd=None, fields=("cost",),
+    )
+    assert out == ""
+    assert "≈" not in out
+
+
+@pytest.mark.parametrize("cost", [0, 0.0, -0.5, -1.0])
+def test_format_footer_cost_nonpositive_skipped(cost):
+    """Zero / negative cost is missing data, not a real figure."""
+    out = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        session_cost_usd=cost, fields=("cost",),
+    )
+    assert out == ""
+    assert "≈" not in out
+
+
+def test_cost_not_in_default_fields():
+    """``cost`` is opt-in: unset ``fields`` renders byte-identically to before."""
+    from gateway.runtime_footer import _DEFAULT_FIELDS
+
+    assert "cost" not in _DEFAULT_FIELDS
+    assert list(_DEFAULT_FIELDS) == ["model", "context_pct", "cwd"]
+    out = format_runtime_footer(
+        model="openai/gpt-5.4", context_tokens=50_247, context_length=1_000_000,
+        cwd="/var/data", session_cost_usd=1.2345,
+    )
+    assert out == "gpt-5.4 · 5% · /var/data"
+
+
+def test_format_footer_cost_joined_in_field_order():
+    """Existing field order/semantics are unchanged; cost joins where listed."""
+    out = format_runtime_footer(
+        model="m", context_tokens=1, context_length=100, cwd="",
+        session_cost_usd=0.175, fields=("model", "context_pct", "cost"),
+    )
+    assert out == "m · 1% · ≈$0.175"
+
+
+def test_build_footer_line_threads_session_cost():
+    """End-to-end: enabled footer with ``cost`` in fields renders the value."""
+    out = build_footer_line(
+        user_config={
+            "display": {
+                "runtime_footer": {
+                    "enabled": True,
+                    "fields": ["model", "cost"],
+                }
+            }
+        },
+        platform_key="discord",
+        model="gpt-5.4",
+        context_tokens=0,
+        context_length=None,
+        cwd="",
+        session_cost_usd=0.175,
+    )
+    assert out == "gpt-5.4 · ≈$0.175"
+
+
+# ---------------------------------------------------------------------------
+# parallel — opt-in live running delegated-children count (WO-D-2026-09-23-015-01 T1b)
+# ---------------------------------------------------------------------------
+
+def test_format_footer_parallel_renders():
+    """A measured live delegation count renders as ``並行N``."""
+    out = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        parallel_children=2, fields=("parallel",),
+    )
+    assert out == "並行2"
+
+
+def test_format_footer_parallel_zero_renders():
+    """A measured zero count renders as ``並行0`` permanently (owner ruling 2026-09-24)."""
+    out = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        parallel_children=0, fields=("parallel",),
+    )
+    assert out == "並行0"
+
+
+@pytest.mark.parametrize("parallel_children", [None, "3", 2.0])
+def test_format_footer_parallel_unmeasurable_renders_placeholder(parallel_children):
+    """None / non-int is unmeasurable data: the column still renders ``並行?`` — never skipped,
+    never faked as 0."""
+    out = format_runtime_footer(
+        model="m", context_tokens=0, context_length=None, cwd="",
+        parallel_children=parallel_children, fields=("parallel", "model"),
+    )
+    assert out == "並行? · m"
+    assert "並行0" not in out
+
+
+def test_parallel_not_in_default_fields():
+    """``parallel`` is opt-in: unset ``fields`` renders byte-identically to before."""
+    from gateway.runtime_footer import _DEFAULT_FIELDS
+
+    assert "parallel" not in _DEFAULT_FIELDS
+    assert list(_DEFAULT_FIELDS) == ["model", "context_pct", "cwd"]
+    out = format_runtime_footer(
+        model="openai/gpt-5.4", context_tokens=50_247, context_length=1_000_000,
+        cwd="/var/data", parallel_children=7,
+    )
+    assert out == "gpt-5.4 · 5% · /var/data"
+
+
+def test_format_footer_parallel_joined_in_field_order():
+    """Existing field order/semantics unchanged; parallel joins where listed (after cost)."""
+    out = format_runtime_footer(
+        model="m", context_tokens=1, context_length=100, cwd="",
+        session_cost_usd=0.175, parallel_children=3,
+        fields=("model", "context_pct", "cost", "parallel"),
+    )
+    assert out == "m · 1% · ≈$0.175 · 並行3"
+
+
+def test_build_footer_line_threads_parallel_children():
+    """End-to-end: enabled footer with ``parallel`` in fields renders the value."""
+    out = build_footer_line(
+        user_config={
+            "display": {
+                "runtime_footer": {
+                    "enabled": True,
+                    "fields": ["model", "parallel"],
+                }
+            }
+        },
+        platform_key="discord",
+        model="gpt-5.4",
+        context_tokens=0,
+        context_length=None,
+        cwd="",
+        parallel_children=2,
+    )
+    assert out == "gpt-5.4 · 並行2"

@@ -2491,7 +2491,7 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
 def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup, *, workdir, session_id, session_db):
     runtime = setup.runtime
     pr = _cfg.get("provider_routing") or {}
-    return AIAgent(
+    agent = AIAgent(
         model=setup.model,
         api_key=runtime.get("api_key"),
         base_url=runtime.get("base_url"),
@@ -2523,6 +2523,12 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         session_id=session_id,
         session_db=session_db,
     )
+    # Per-job prefix slimming (B pilot): skills stay loadable; only the catalog block is dropped.
+    # Attach post-construction (same convention as `_end_session_on_close` below) so AIAgent's
+    # ~60-parameter signature stays untouched and every other cron job is unaffected.
+    if job.get("trim_skills_catalog"):
+        agent._trim_skills_catalog = True
+    return agent
 
 
 class _FireAudit:
@@ -2549,6 +2555,101 @@ class _FireAudit:
 
 
 
+# --- Stale-code guard (WO-D-2026-09-23-009-08) ---------------------------------------------
+# A cron worker records the code checkout it started with; a long pre-run script can block for
+# hours and cross the daily 04:30 update window, after which the on-disk code is new while this
+# process still holds the old modules — constructing the agent then mixes old and new code
+# (ImportError / signature drift; brand db5aae922e64 lost five days to exactly that). The guard
+# aborts such a round before anything is built; the next scheduled fire runs on the new code.
+#
+# The probe reads git metadata directly instead of shelling out to ``git rev-parse`` (a refinement
+# of the §8-A sketch): the cron run path must not spawn extra processes — fault-injection
+# harnesses key off Popen ordering, and installs without a git binary on PATH must keep working.
+# Same semantics either way: the checkout's HEAD commit id.
+
+
+_OID_RE = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
+
+
+def _normalize_oid(value: Optional[str]) -> Optional[str]:
+    """Lower-cased commit OID, or ``None`` when the text is not a full SHA-1/SHA-256 object id."""
+    text = (value or "").strip().lower()
+    return text if _OID_RE.fullmatch(text) else None
+
+
+def _repo_code_fingerprint(repo_root: Optional[Path] = None) -> Optional[str]:
+    """HEAD commit id of the checkout this process runs from, or ``None`` when unresolvable.
+
+    ``None`` (no git metadata, unreadable files, an OID that does not validate, an indirection we
+    cannot follow) means "unknown": callers skip the guard, so installs without a checkout behave
+    exactly as before.
+    """
+    repo = repo_root if repo_root is not None else Path(__file__).resolve().parent.parent
+    try:
+        git_dir = repo / ".git"
+        if git_dir.is_file():  # worktree / submodule: the file holds "gitdir: <path>"
+            marker = git_dir.read_text(encoding="utf-8", errors="replace").strip()
+            if not marker.startswith("gitdir:"):
+                return None
+            git_dir = Path(marker.split(":", 1)[1].strip())
+            if not git_dir.is_absolute():
+                git_dir = repo / git_dir
+        # A linked worktree keeps HEAD in its per-worktree gitdir but refs/packed-refs in the
+        # common dir (``commondir`` holds the path, relative to this gitdir when not absolute).
+        common_dir = git_dir
+        try:
+            common_marker = (git_dir / "commondir").read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            common_marker = ""
+        if common_marker:
+            common_dir = Path(common_marker)
+            if not common_dir.is_absolute():
+                common_dir = git_dir / common_dir
+        head = (git_dir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+        if not head.startswith("ref:"):
+            return _normalize_oid(head)  # detached HEAD: the file holds the sha itself
+        ref = head.split(":", 1)[1].strip()
+        try:
+            loose = (common_dir / ref).read_text(encoding="utf-8", errors="replace").strip()
+            if loose:
+                return _normalize_oid(loose)
+        except OSError:
+            pass
+        # A packed branch ref (git pack-refs) leaves no loose file under refs/.
+        packed = (common_dir / "packed-refs").read_text(encoding="utf-8", errors="replace")
+        for line in packed.splitlines():
+            line = line.strip()
+            if not line or line.startswith(("#", "^")):
+                continue
+            sha, _, name = line.partition(" ")
+            if name.strip() == ref:
+                return _normalize_oid(sha)
+        return None
+    except Exception:
+        # Fail-open by design: a best-effort probe must never break a run.
+        return None
+
+
+def _stale_code_abort_reason(start_fingerprint: Optional[str]) -> Optional[str]:
+    """Reason string when the checkout changed since ``start_fingerprint``, else ``None``.
+
+    Aborts only on a *verified* mismatch: an unknown fingerprint on either side returns ``None``
+    (fail-open), which keeps runs on git-less installs unchanged.
+    """
+    if not start_fingerprint:
+        return None
+    current = _repo_code_fingerprint()
+    if not current or current == start_fingerprint:
+        return None
+    return (
+        "Stale cron worker aborted before agent construction: the code checkout changed while "
+        f"this run was pending (HEAD {start_fingerprint[:10]} -> {current[:10]}). No agent was "
+        "constructed and the job body did not run. Re-run the job to use the updated code — a "
+        "recurring job's next scheduled fire does that automatically; a one-shot job must be "
+        "re-run explicitly."
+    )
+
+
 def run_job(
     job: dict, *, defer_agent_teardown: Optional[list] = None, extra_prompt: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None, execution_id: Optional[str] = None,
@@ -2571,10 +2672,12 @@ def run_job(
     job_id = job["id"]
     job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
 
+    # Stale-code guard: record the checkout this run started from BEFORE the pre-run script can
+    # block for hours — that wait is what lets an update window change the code underneath us.
+    _code_at_start = _repo_code_fingerprint()
     early, prompt = _prepare_job_prompt(job, job_id, job_name, extra_prompt, cancel_event)
     if early is not None:
         return early
-    from run_agent import AIAgent
 
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
@@ -2585,11 +2688,24 @@ def run_job(
     _session_db = None
     _audit: Optional[_FireAudit] = None
     _worker_state: dict = {}
-    scope = _CronRunScope(job, job_id, execution_id)
+    scope = None
     try:
+        # Stale-code guard (WO-D-2026-09-23-009-08): run this BEFORE any runtime setup — scope
+        # entry, lazy imports, dotenv reload — because a stale process importing the agent chain
+        # against new on-disk code is the very hazard this guard exists for, and an import that
+        # fails there would bypass the guard entirely. The raise stays inside this try so the
+        # round keeps the normal failure bookkeeping below.
+        _stale_reason = _stale_code_abort_reason(_code_at_start)
+        if _stale_reason:
+            logger.warning("Job '%s' (ID: %s): %s", job_name, job_id, _stale_reason)
+            raise RuntimeError(_stale_reason)
+
+        scope = _CronRunScope(job, job_id, execution_id)
         scope.enter()
         if scope.workdir:
             logger.info("Job '%s': using task-scoped workdir %s", job_id, scope.workdir)
+
+        from run_agent import AIAgent
         _reload_dotenv_and_publish_delivery_target(job)
 
         jc = _load_cron_job_config(job, job_id, job_name)
@@ -2663,7 +2779,8 @@ def run_job(
         from cron.scheduler_detached_worker import defer_teardown_to_running_worker
         _worker_teardown_deferred = defer_teardown_to_running_worker(
             _worker_state.get("future"), _session_db, agent, job_id, job_name, _cron_session_id)
-        scope.exit()
+        if scope is not None:  # the stale-code guard can abort before the run scope exists
+            scope.exit()
         if _session_db and not _worker_teardown_deferred:
             _finalize_cron_session(_session_db, agent, job_id, job_name, _cron_session_id)
         # Tear down the ephemeral agent or the gateway leaks fds per tick (EMFILE). With deferred
@@ -3588,6 +3705,35 @@ class _ExternalWorkerPostHandoffError(RuntimeError):
     """The waiter failed after the worker was spawned and may own the execution."""
 
 
+# T2-B: grace for a worker that is still in final teardown before its scope is reaped.
+# The ledger row is already terminal, so killing the scope only ends teardown, never
+# the durable execution record.
+_CRON_SCOPE_EXIT_GRACE_SECONDS = 15.0
+
+
+def _reap_external_worker_scope(process: subprocess.Popen, scope_unit: str) -> None:
+    """Reclaim a terminal cron worker's transient user scope and any cgroup residue.
+
+    ``systemd-run --scope --collect`` only collects an *empty* scope. A daemon the job
+    spawned (e.g. ``adb -L tcp:5037 fork-server server``) or a worker wedged in
+    ``futex_do_wait`` keeps the cgroup populated, so the unit stays active forever and
+    leaks RAM (#ops-alerts 09-19/09-20/09-21 recurrence; T2-B). The waiter is the only
+    owner that knows both the wrapper pid and the unit name, so it reclaims here:
+    wait a short grace for a normal exit, then ``systemctl --user stop`` (SIGTERM all)
+    and force-kill survivors (``tools.process_registry._stop_systemd_unit``).
+    """
+    deadline = time.monotonic() + _CRON_SCOPE_EXIT_GRACE_SECONDS
+    while process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.25)
+    try:
+        from tools.process_registry import _stop_systemd_unit
+
+        if not _stop_systemd_unit(scope_unit):
+            logger.warning("Cron worker scope %s could not be confirmed reaped", scope_unit)
+    except Exception:
+        logger.debug("Could not reap cron worker scope %s", scope_unit, exc_info=True)
+
+
 def _wait_for_external_cron_worker(
     process: subprocess.Popen,
     *,
@@ -3595,6 +3741,7 @@ def _wait_for_external_cron_worker(
     job_id: Optional[str] = None,
     handoff_files: tuple[Path, ...] = (),
     stderr_path: Optional[Path] = None,
+    scope_unit: str = "",
 ) -> bool:
     try:
         return _wait_for_external_cron_worker_body(
@@ -3603,6 +3750,11 @@ def _wait_for_external_cron_worker(
     except Exception as wait_error:
         raise _ExternalWorkerPostHandoffError(str(wait_error)) from wait_error
     finally:
+        # T2-B: a completed/hung external worker must not leave its transient scope
+        # (and any daemon inside it) behind. Runs for success, failure and the
+        # terminal-but-still-live path alike.
+        if scope_unit:
+            _reap_external_worker_scope(process, scope_unit)
         if job_id is not None:
             _key = _inflight_key(job_id)
             with _running_lock:
@@ -3669,11 +3821,16 @@ def _launch_external_cron_worker(job: dict) -> bool:
         )
     except Exception:
         require_restart_safe_scope = False
+    unit_suffix = f"cron-{job_id}-exec-{execution_id}"
     dispatch = restart_safe_gateway_child_argv(
         command,
-        unit_suffix=f"cron-{job_id}-exec-{execution_id}",
+        unit_suffix=unit_suffix,
         require_restart_safe_scope=require_restart_safe_scope,
     )
+    # T2-B: the transient scope this dispatch owns ("" when it degraded to a direct
+    # subprocess). The waiter reclaims it — and any daemon left in its cgroup — once the
+    # execution is terminal, so a completed job cannot pin the scope forever.
+    scope_unit = f"hermes-worker-{unit_suffix}.scope" if dispatch.mode == "scoped" else ""
     if dispatch.mode == "in_process":
         return False
 
@@ -3781,6 +3938,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
                     job_id=job_id,
                     handoff_files=(payload_path, stderr_path),
                     stderr_path=stderr_path,
+                    scope_unit=scope_unit,
                 )
             finally:
                 ack_path.unlink(missing_ok=True)
@@ -3799,6 +3957,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
                     job_id=job_id,
                     handoff_files=(payload_path, stderr_path),
                     stderr_path=stderr_path,
+                    scope_unit=scope_unit,
                 )
             logger.info(
                 "Cron job '%s' handed to restart-safe worker pid=%s execution=%s dispatch=%s",
@@ -3818,6 +3977,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
                 job_id=job_id,
                 handoff_files=(payload_path, stderr_path),
                 stderr_path=stderr_path,
+                scope_unit=scope_unit,
             )
         returncode = process.poll()
         if returncode is not None:
@@ -3858,6 +4018,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
         job_id=job_id,
         handoff_files=(payload_path, ack_path, stderr_path),
         stderr_path=stderr_path,
+        scope_unit=scope_unit,
     )
 
 
