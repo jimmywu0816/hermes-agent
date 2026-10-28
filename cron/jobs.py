@@ -1811,6 +1811,19 @@ def _next_run_or_reject_past_oneshot(
     return next_run_at
 
 
+def precheck_create_schedule(schedule: str, label: str = "cron job") -> dict[str, Any]:
+    """Read-only create-schedule pre-check, sharing ``create_job``'s rejection rule.
+
+    Parses ``schedule`` and applies the same past-one-shot rejection as ``create_job``
+    (via ``_next_run_or_reject_past_oneshot``) without touching the job store. The
+    cronjob tool calls this before its explicit-deliver gate so an omitted deliver
+    cannot mask a stale one-shot; the returned parsed schedule is informational.
+    """
+    parsed_schedule = parse_schedule(schedule)
+    _next_run_or_reject_past_oneshot(parsed_schedule, label, schedule, "")
+    return parsed_schedule
+
+
 def create_job(
     prompt: Optional[str],
     schedule: str,

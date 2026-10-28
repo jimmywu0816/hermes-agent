@@ -40,6 +40,7 @@ from cron.jobs import (
     mark_job_run,
     parse_schedule,
     pause_job,
+    precheck_create_schedule,
     remove_job,
     resolve_job_ref,
     resume_job,
@@ -644,24 +645,6 @@ def _action_create(a: dict[str, Any]) -> str:
     deliver = _normalize_deliver_param(a["deliver"])
     if not a["schedule"]:
         return tool_error("schedule is required for create", success=False)
-    # Fleet governance hard gate (D-2026-09-18-054, tightened WO-D-2026-09-18-067-01):
-    # creation must carry an explicit deliver target in ALL contexts — an omitted deliver
-    # used to resolve to the cron run's creator target BEFORE the gate and slip past the
-    # "must be explicit" contract. An EXPLICIT 'origin' (or any explicit target) still
-    # creates: cron-context resolution applies to explicit values only; the lint remains
-    # the governance signal for unmanaged choices.
-    if deliver is None:
-        return tool_error(
-            "create requires an explicit deliver target (omitted deliver is disallowed in "
-            "all contexts, including cron runs): pass 'local' or a concrete "
-            "platform:chat_id[:thread_ts] destination",
-            success=False)
-    resolved_deliver = _resolve_cron_context_deliver(deliver)
-    if resolved_deliver is None:
-        return tool_error(
-            "create requires an explicit deliver target (implicit-origin creation is disallowed): "
-            "pass 'local' or a concrete platform:chat_id[:thread_ts] destination",
-            success=False)
     canonical_skills = _canonical_skills(a["skill"], a["skills"])
     _no_agent = bool(a["no_agent"])
     # no_agent=True -> the script IS the job (prompt/skills optional); else prompt or skills.
@@ -676,6 +659,9 @@ def _action_create(a: dict[str, Any]) -> str:
                 success=False)
     elif not prompt and not canonical_skills:
         return tool_error("create requires either prompt or at least one skill", success=False)
+    # Field-specific validation runs BEFORE the fleet deliver gate: an omitted deliver
+    # must not mask a more actionable error (script traversal, bad bot-chat profile,
+    # missing context_from job), matching the update path's field-first ordering.
     error = (
         (prompt and _scan_cron_prompt(prompt))
         or (script and _validate_cron_script_path(script))
@@ -691,6 +677,32 @@ def _action_create(a: dict[str, Any]) -> str:
             [a["context_from"]] if isinstance(a["context_from"], str) else a["context_from"])))
     if error:
         return tool_error(error, success=False)
+
+    # Stale one-shots are rejected by create_job, i.e. after this function's deliver gate
+    # until now. Pre-check through the same read-only helper (single rejection rule) so
+    # an omitted deliver cannot mask "past and cannot be scheduled" — and so no job is
+    # ever persisted before either rejection.
+    precheck_create_schedule(a["schedule"])
+
+    # Fleet governance hard gate (D-2026-09-18-054, tightened WO-D-2026-09-18-067-01):
+    # creation must carry an explicit deliver target in ALL contexts — an omitted deliver
+    # used to resolve to the cron run's creator target BEFORE the gate and slip past the
+    # "must be explicit" contract. An EXPLICIT 'origin' (or any explicit target) still
+    # creates: cron-context resolution applies to explicit values only; the lint remains
+    # the governance signal for unmanaged choices. Kept after field validation: the gate
+    # still rejects every omitted deliver, but a more specific field error wins first.
+    if deliver is None:
+        return tool_error(
+            "create requires an explicit deliver target (omitted deliver is disallowed in "
+            "all contexts, including cron runs): pass 'local' or a concrete "
+            "platform:chat_id[:thread_ts] destination",
+            success=False)
+    resolved_deliver = _resolve_cron_context_deliver(deliver)
+    if resolved_deliver is None:
+        return tool_error(
+            "create requires an explicit deliver target (implicit-origin creation is disallowed): "
+            "pass 'local' or a concrete platform:chat_id[:thread_ts] destination",
+            success=False)
 
     context_from = a["context_from"]
     if a["continuity"] is not None:
@@ -1119,7 +1131,7 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
             },
             "deliver": {
                 "type": "string",
-                "description": "Where the job's output is POSTED as a one-way message (the job itself always runs in a fresh session with no chat context). Omit to address the chat/topic this job was created from. Otherwise: 'local' (save only, no delivery), 'all' (every connected home channel, resolved at fire time), 'bot-chat' or 'bot-chat:<profile>' (inject into a Bot Chat as a real message), or platform:chat_id:thread_id (e.g. 'telegram:-1001234567890:17585'). Comma-combine like 'origin,all'. From a local chat (CLI, TUI or Desktop) the default writes the result into that chat's history as a note, seen when the chat is reopened and by its next turn, not as a live message."
+                "description": "REQUIRED for create: there is no implicit default — an omitted deliver is rejected, so pass an explicit target. Where the job's output is POSTED as a one-way message (the job itself always runs in a fresh session with no chat context): 'local' (save only, no delivery), 'origin' (the chat/topic this job was created from; from a cron run it resolves at create time to that run's concrete target), 'all' (every connected home channel, resolved at fire time), 'bot-chat' or 'bot-chat:<profile>' (inject into a Bot Chat as a real message), or platform:chat_id:thread_id (e.g. 'telegram:-1001234567890:17585'). Comma-combine like 'origin,all'."
             },
             "failure_deliver": {
                 "type": "string",
