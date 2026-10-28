@@ -232,6 +232,7 @@ class TestUnifiedCronjobTool:
                 prompt="Check server status",
                 schedule="every 1h",
                 name="Server Check",
+                deliver="local",
             )
         )
         assert created["success"] is True
@@ -252,6 +253,7 @@ class TestUnifiedCronjobTool:
                 prompt="Weekly report",
                 schedule="every monday 9am",
                 name="Weekly Report",
+                deliver="local",
             )
         )
         assert created["success"] is True
@@ -268,7 +270,7 @@ class TestUnifiedCronjobTool:
 
     def test_update_to_natural_weekday_schedule(self):
         pytest.importorskip("croniter")
-        created = json.loads(cronjob(action="create", prompt="Check", schedule="every 1h"))
+        created = json.loads(cronjob(action="create", prompt="Check", schedule="every 1h", deliver="local"))
         job_id = created["job_id"]
 
         updated = json.loads(
@@ -303,7 +305,7 @@ class TestUnifiedCronjobTool:
         assert listing["jobs"][0]["schedule"] == "every 60m"
 
     def test_pause_and_resume(self):
-        created = json.loads(cronjob(action="create", prompt="Check", schedule="every 1h"))
+        created = json.loads(cronjob(action="create", prompt="Check", schedule="every 1h", deliver="local"))
         job_id = created["job_id"]
 
         paused = json.loads(cronjob(action="pause", job_id=job_id))
@@ -408,7 +410,7 @@ class TestUnifiedCronjobTool:
         from cron.jobs import get_job
 
         created = json.loads(
-            cronjob(action="create", prompt="x", schedule="every 1h")
+            cronjob(action="create", prompt="x", schedule="every 1h", deliver="local")
         )
         updated = json.loads(
             cronjob(
@@ -453,6 +455,7 @@ class TestAgentCannotSetModelPin:
                 action="create",
                 prompt="Check",
                 schedule="every 1h",
+                deliver="local",
                 model="anthropic/claude-sonnet-4",
                 provider="anthropic",
             )
@@ -527,6 +530,7 @@ class TestRegisteredHandlerForwardsAttachToSession:
                     "action": "create",
                     "name": "plain",
                     "schedule": "1h",
+                    "deliver": "local",
                     "prompt": "Reply exactly: canary",
                 },
             )
@@ -579,6 +583,7 @@ class TestRegisteredHandlerForwardsAttachToSession:
                 {
                     "action": "create",
                     "schedule": "1h",
+                    "deliver": "local",
                     "prompt": "fire and forget",
                 },
             )
@@ -595,9 +600,11 @@ class TestRegisteredHandlerForwardsAttachToSession:
         assert "attach_to_session" not in formatted
 
 
-class TestLocalDeliveryNotice:
-    """#51568 — TUI/CLI cron jobs are local-only; surface that at create time
-    so the agent doesn't promise a delivery that never happens."""
+class TestOmittedDeliverRejected:
+    """D-2026-09-18-054 / WO-D-2026-09-18-067-01: a create that omits
+    ``deliver`` is rejected in every context.  This supersedes the #51568
+    local-only notice (and the implicit-origin behavior it warned about):
+    governance deliberately overrides the upstream default."""
 
     @pytest.fixture(autouse=True)
     def _setup_cron_dir(self, tmp_path, monkeypatch):
@@ -618,27 +625,36 @@ class TestLocalDeliveryNotice:
         yield
         clear_session_vars(tokens)
 
-    def test_omitted_deliver_no_origin_emits_notice(self):
+    def test_omitted_deliver_is_rejected(self):
+        """D-2026-09-18-054 / WO-D-2026-09-18-067-01: an omitted deliver is
+        rejected even with no session origin.  The old "downgrade to local"
+        default is deliberately overridden by fleet governance, and a rejected
+        create must not leave a job behind."""
+        from cron.jobs import load_jobs
+
         created = json.loads(
             cronjob(action="create", prompt="Output the time", schedule="every 2m")
         )
-        assert created["success"] is True
-        # Omitted deliver from a session with no origin downgrades to local.
-        assert created["deliver"] == "local"
-        assert "local-only cron job" in created["message"]
+        assert created["success"] is False
+        assert "explicit deliver" in created["error"]
+        assert load_jobs() == []
 
 
-    def test_gateway_origin_no_notice(self, monkeypatch):
-        # With a captured gateway origin, omitted deliver becomes origin and
-        # resolves to that chat — nothing to warn about.
+    def test_omitted_deliver_is_rejected_with_gateway_origin(self):
+        """D-2026-09-18-054 / WO-D-2026-09-18-067-01: a captured gateway
+        origin does not make an omitted deliver valid.  The old implicit-origin
+        default is deliberately overridden by fleet governance, and a rejected
+        create must not leave a job behind."""
+        from cron.jobs import load_jobs
         from gateway.session_context import set_session_vars
 
         set_session_vars(platform="telegram", chat_id="999")
         created = json.loads(
             cronjob(action="create", prompt="x", schedule="every 2m")
         )
-        assert created["deliver"] == "origin"
-        assert "local-only cron job" not in created["message"]
+        assert created["success"] is False
+        assert "explicit deliver" in created["error"]
+        assert load_jobs() == []
 
 
 class TestValidateCronBaseUrl:
