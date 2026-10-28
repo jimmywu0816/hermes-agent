@@ -3974,7 +3974,7 @@ class GatewayRunner(
         # #98619: an admitted API turn carries its session-id provenance; other platforms leave it unset.
         from gateway.session_api_turn import api_session_vars
         _history_delivery = api_session_vars().get("session_history_delivery")
-        return set_session_vars(
+        tokens = set_session_vars(
             platform=source.platform.value,
             chat_id=source.chat_id,
             chat_type=str(source.chat_type) if source.chat_type else "",
@@ -3993,11 +3993,19 @@ class GatewayRunner(
             profile=getattr(source, "profile", "") or "",
             async_delivery=_async_delivery,
             cron_session="", session_history_delivery=_history_delivery)
+        # Mirror the origin into os.environ so spawned CLIs (hermes send) can recognize
+        # self-targeted sends as redundant (WO-D-2026-09-14-019-04 D).
+        from gateway.session_context import set_current_session_origin
+        set_current_session_origin(
+            platform=source.platform.value, chat_id=source.chat_id,
+            thread_id=source.thread_id)
+        return tokens
 
     def _clear_session_env(self, tokens: list) -> None:
         """Restore session context variables to their pre-handler values."""
-        from gateway.session_context import clear_session_vars
+        from gateway.session_context import clear_current_session_origin, clear_session_vars
         clear_session_vars(tokens)
+        clear_current_session_origin()
 
     @_contextmanager
     def _session_env_scope(self, context: SessionContext):

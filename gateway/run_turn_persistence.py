@@ -198,6 +198,28 @@ class GatewayTurnPersistenceMixin:
         display_reasoning = escape_code_fences_for_display(display_reasoning)
         return t("gateway.reasoning.block", reasoning=display_reasoning, response=response)
 
+    def _footer_profile_label(self, source) -> str:
+        """Resolve the profile name that served this turn (footer ``bot`` field).
+
+        Resolution order mirrors ``_resolve_profile_home_for_source``: ``source.profile``, then
+        profile routing, then the active profile. Never raises; falls back to "default".
+        """
+        try:
+            name = (getattr(source, "profile", "") or "").strip()
+            if name:
+                return name
+            routed = self._profile_name_for_source(source)
+            if routed and str(routed).strip():
+                return str(routed).strip()
+        except Exception:
+            pass
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+
+            return get_active_profile_name() or "default"
+        except Exception:
+            return "default"
+
     def _hmwa_runtime_footer_line(self, agent_result, source, _turn_seconds):
         """Runtime-metadata footer for the FINAL message of the turn; off by default
         (display.runtime_footer.enabled=false). Never on a finite (`-z`, `chat -q`) turn: its reply is
@@ -210,12 +232,18 @@ class GatewayTurnPersistenceMixin:
             from gateway.runtime_footer import build_footer_line as _bfl
             return _bfl(
                 user_config=_load_gateway_config(),
-                platform_key=_platform_config_key(source.platform), model=agent_result.get("model"),
+                platform_key=_platform_config_key(source.platform),
+                provider=agent_result.get("provider"),
+                model=agent_result.get("model"),
                 context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                 context_length=agent_result.get("context_length") or None,
                 cwd=_terminal_scope_cwd(""), turn_seconds=_turn_seconds,
                 requested_model=agent_result.get("requested_model"),
                 served_model=agent_result.get("served_model"),
+                reasoning_effort=agent_result.get("effort"),
+                session_cost_usd=agent_result.get("session_cost_usd"),
+                parallel_children=agent_result.get("parallel_children"),
+                profile=self._footer_profile_label(source),
             )
         except Exception as _footer_err:
             logger.debug("runtime_footer build failed: %s", _footer_err)

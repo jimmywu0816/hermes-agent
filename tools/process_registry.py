@@ -120,6 +120,12 @@ _SYSTEMD_RUN_NO_EXPAND = True
 _MIN_WORKER_MEMORY_MAX_BYTES = 64 * 1024 * 1024
 _DEFAULT_WORKER_MEMORY_MAX_BYTES = 1024 * 1024 * 1024
 _WORKER_MEMORY_MAX_CAP_BYTES = 4 * 1024 * 1024 * 1024
+# Bound on swap spill-over for a worker scope: without it, a worker that outgrew
+# MemoryMax kept running on host swap — on a 32 GiB host one pytest worker filled
+# 3.9 GiB of an 8 GiB swap file and dragged the whole user slice into a file-backed
+# refault livelock while ~11 GiB RAM sat free (WO-D-2026-09-16-003-01 T4,
+# semantic re-port of carried 0009 / candidate 14d34cedd7).
+_WORKER_MEMORY_SWAP_MAX_BYTES = 512 * 1024 * 1024
 
 
 def _worker_memory_max_bytes() -> int:
@@ -176,9 +182,17 @@ def _worker_memory_max_bytes() -> int:
     return min(override_bound, safe_bound) if override_bound else safe_bound
 
 
+def _worker_memory_swap_max_bytes() -> int:
+    """Swap bound for a worker scope; never wider than its RAM bound (MemoryMax)."""
+    return min(_WORKER_MEMORY_SWAP_MAX_BYTES, _worker_memory_max_bytes())
+
+
 def _systemd_scope_argv(binary: str, unit_name: str, *argv: str) -> list[str]:
     """``systemd-run --user --scope`` argv shared by the probe and real spawns.
     ``--collect`` self-cleans the scope after exit; ``--unit`` names it for systemctl.
+    ``MemorySwapMax`` bounds swap spill-over: a worker that outgrows ``MemoryMax``
+    fails fast instead of filling the host's swap file (and it stays <= MemoryMax so
+    the swap bound can never be wider than the RAM bound).
     No ``OOMPolicy=``: transient scopes reject it on systemd <253 (#102486).
     ``--expand-environment=no`` keeps the command byte-identical (#132385)."""
     no_expand = ["--expand-environment=no"] if _SYSTEMD_RUN_NO_EXPAND else []
@@ -186,6 +200,7 @@ def _systemd_scope_argv(binary: str, unit_name: str, *argv: str) -> list[str]:
         binary, "--user", "--scope", "--quiet", *no_expand, "--unit", unit_name, "--collect",
         "--property", "MemoryAccounting=yes",
         "--property", f"MemoryMax={_worker_memory_max_bytes()}",
+        "--property", f"MemorySwapMax={_worker_memory_swap_max_bytes()}",
         "--", *argv,
     ]
 
@@ -470,12 +485,89 @@ def restart_safe_gateway_child_argv(
     return GatewayChildDispatch("scoped", scoped)
 
 
+def _scope_cgroup_residual_count(unit_name: str) -> Optional[int]:
+    """Processes still in *unit_name*'s cgroup, or None when the probe is unavailable.
+    A line count (not the PID values) is used: a reader in another PID namespace sees
+    every foreign PID as 0 while the residue is still real. 0 means systemd already
+    collected the unit; a positive count after ``stop`` means a SIGTERM-ignoring daemon
+    is pinning the transient scope.
+    """
+    import shutil
+
+    binary = shutil.which("systemctl")
+    if binary is None:
+        return None
+    try:
+        result = subprocess.run(
+            [binary, "--user", "show", unit_name, "--property=ControlGroup", "--value"],
+            capture_output=True,
+            timeout=5,
+            stdin=subprocess.DEVNULL,
+            env=systemd_user_bus_env(),
+        )
+    except Exception:
+        return None
+    cgroup = (result.stdout or b"").decode("utf-8", "replace").strip()
+    if result.returncode != 0 or not cgroup:
+        return 0
+    for _ in range(3):
+        try:
+            raw = Path(f"/sys/fs/cgroup{cgroup}/cgroup.procs").read_text(encoding="utf-8")
+            return sum(1 for line in raw.splitlines() if line.strip())
+        except FileNotFoundError:
+            return 0
+        except OSError:
+            time.sleep(0.2)
+    return None
+
+
+def _drain_scope_residuals(unit_name: str, *, attempts: int = 8) -> bool:
+    """Force-kill processes a ``stop`` left behind in *unit_name*'s cgroup.
+
+    ``systemctl stop`` SIGTERMs every member but escalates to SIGKILL only after
+    ``TimeoutStopSec``; a daemon that outlives that window keeps the transient scope
+    active forever (``--collect`` only collects an *empty* scope). Best-effort: True
+    when the cgroup is empty (or unobservable), False when residue proved durable.
+    """
+    count = _scope_cgroup_residual_count(unit_name)
+    if not count:  # 0 = empty; None = no probe to escalate on
+        return True
+    import shutil
+
+    binary = shutil.which("systemctl")
+    if binary is None:
+        return False
+    try:
+        subprocess.run(
+            [binary, "--user", "kill", "--kill-whom=all", "--signal=SIGKILL", unit_name],
+            capture_output=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+            env=systemd_user_bus_env(),
+        )
+    except Exception as exc:
+        logger.debug("systemctl --user kill --kill-whom=all %s failed: %s", unit_name, exc)
+        return False
+    for _ in range(attempts):
+        time.sleep(0.25)
+        if not _scope_cgroup_residual_count(unit_name):
+            return True
+    logger.warning(
+        "Worker scope %s still holds %s residual process(es) after SIGKILL",
+        unit_name, _scope_cgroup_residual_count(unit_name))
+    return False
+
+
 def _stop_systemd_unit(unit_name: str) -> bool:
     """Stop a transient systemd user scope by unit name.
     Reaps the *entire* cgroup — catching double-forked descendants reparented to init
     inside the scope that survive a plain PID signal (SIGTERM all, SIGKILL after
     ``TimeoutStopSec``). True if stopped or already gone; False if ``systemctl`` is
     unavailable or the stop failed.
+
+    T2-B hardening: after the stop, scan the unit's cgroup and force-kill any process
+    that survived (``_drain_scope_residuals``) so a daemon that ignores SIGTERM cannot
+    pin the transient scope. The return value keeps its original contract.
 
     See #70716.
     """
@@ -496,9 +588,11 @@ def _stop_systemd_unit(unit_name: str) -> bool:
         if result.returncode != 0:
             stderr = (result.stderr or b"").decode(errors="replace").strip()
             if any(marker in stderr.lower() for marker in ("not loaded", "not found", "does not exist")):
+                _drain_scope_residuals(unit_name)
                 return True
             logger.debug("systemctl --user stop %s exited %d: %s", unit_name, result.returncode, stderr)
             return False
+        _drain_scope_residuals(unit_name)
         return True
     except Exception as exc:
         logger.debug("systemctl --user stop %s failed: %s", unit_name, exc)
