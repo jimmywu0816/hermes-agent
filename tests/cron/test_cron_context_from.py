@@ -302,6 +302,7 @@ class TestContinuityFlag:
             action="create",
             prompt="Scan",
             schedule="every 1h",
+            deliver="local",
             continuity=False,
         ))
         assert result["success"] is True
@@ -317,6 +318,7 @@ class TestContinuityFlag:
             action="create",
             prompt="Digest",
             schedule="every 2h",
+            deliver="local",
             context_from=upstream["id"],
             continuity=True,
         ))
@@ -383,6 +385,7 @@ class TestContinuityFlag:
             action="create",
             prompt="Scan for news",
             schedule="every 1h",
+            deliver="local",
             continuity=True,
         ))
         job = get_job(result["job_id"])

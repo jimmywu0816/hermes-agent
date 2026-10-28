@@ -78,7 +78,8 @@ def test_cronjob_tool_rejects_stale_past_one_shot(cron_env, monkeypatch):
     monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
     stale = (now - timedelta(minutes=5)).isoformat()
 
-    result = json.loads(cronjob(action="create", prompt="Too late", schedule=stale))
+    result = json.loads(cronjob(
+        action="create", prompt="Too late", schedule=stale, deliver="local"))
 
     assert result["success"] is False
     assert "past and cannot be scheduled" in result["error"]
@@ -489,6 +490,7 @@ class TestCronjobToolScript:
             action="create",
             schedule="every 1h",
             prompt="Monitor things",
+            deliver="local",
             script="some_script.py",
         ))
         job_id = create_result["job_id"]
@@ -510,6 +512,7 @@ class TestCronjobToolScript:
             action="create",
             schedule="every 1h",
             prompt="Monitor things",
+            deliver="local",
             script="data_collector.py",
         )
 
@@ -622,6 +625,7 @@ class TestCronjobToolScriptValidation:
             action="create",
             schedule="every 1h",
             prompt="Monitor things",
+            deliver="local",
             script="../../etc/passwd",
         ))
         assert result["success"] is False

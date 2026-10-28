@@ -319,7 +319,7 @@ class TestToolSurface:
         from cron.jobs import get_job
 
         result = json.loads(cronjob(
-            action="create", prompt="scan", schedule="every 1h",
+            action="create", prompt="scan", schedule="every 1h", deliver="local",
         ))
         assert result["success"] is True
         assert "failure_deliver" not in get_job(result["job_id"])
@@ -332,6 +332,7 @@ class TestToolSurface:
             action="create",
             prompt="scan",
             schedule="every 1h",
+            deliver="local",
             failure_deliver=["slack", "telegram"],
         ))
         assert result["success"] is True
@@ -341,7 +342,7 @@ class TestToolSurface:
         from tools.cronjob_tools import cronjob
 
         via_failure = json.loads(cronjob(
-            action="create", prompt="scan", schedule="every 1h",
+            action="create", prompt="scan", schedule="every 1h", deliver="local",
             failure_deliver="bot-chat:no-such-profile-xyz",
         ))
         via_deliver = json.loads(cronjob(

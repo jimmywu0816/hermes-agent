@@ -120,7 +120,8 @@ class TestNearHorizonSlackThreadKept:
         monkeypatch.setattr("cron.scheduler_provider.resolve_cron_scheduler", lambda: provider)
         with jobs.use_cron_store(tmp_path / "cron"), _session_env(_TOP_LEVEL_SLACK):
             result = json.loads(cronjob_tools.registry.dispatch("cronjob_manage", {
-                "action": "create", "schedule": _run_at_in(1), "prompt": "remind me"}))
+                "action": "create", "schedule": _run_at_in(1), "prompt": "remind me",
+                "deliver": "origin"}))
             assert result["success"], result
             stored = jobs.get_job(result["job_id"])
         assert stored["origin"]["thread_id"] == "1755043010.123456"

@@ -105,7 +105,8 @@ def test_tool_create_registers_provider_before_reporting_success(
     import json
 
     out = json.loads(
-        cronjob(action="create", prompt="echo hi", schedule="every 5m", name="w")
+        cronjob(action="create", prompt="echo hi", schedule="every 5m", name="w",
+                deliver="local")
     )
 
     assert out["success"] is True
@@ -124,7 +125,8 @@ def test_tool_create_reports_partial_registration_failure(
     from tools.cronjob_tools import cronjob
     import json
 
-    out = json.loads(cronjob(action="create", prompt="echo hi", schedule="every 5m", name="w"))
+    out = json.loads(cronjob(action="create", prompt="echo hi", schedule="every 5m", name="w",
+                             deliver="local"))
     assert out["success"] is False
     assert out["job_saved"] is True
     assert out["scheduler_registered"] is False

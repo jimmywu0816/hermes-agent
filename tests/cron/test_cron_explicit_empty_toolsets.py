@@ -74,7 +74,8 @@ def test_cronjob_tool_roundtrip_preserves_explicit_empty(hermes_env):
     from tools.cronjob_tools import cronjob
 
     result = json.loads(cronjob(
-        action="create", prompt="daily digest", schedule="every 1h", enabled_toolsets=[]))
+        action="create", prompt="daily digest", schedule="every 1h",
+        deliver="local", enabled_toolsets=[]))
     assert result["success"] is True, result
 
     job = get_job(result["job_id"])
