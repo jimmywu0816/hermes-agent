@@ -25,6 +25,20 @@ def execution_ledger(tmp_path, monkeypatch):
     return executions
 
 
+@pytest.fixture
+def no_real_hermes_install(monkeypatch):
+    """Keep the spawn-env PATH completion off the checkout's parent directory.
+
+    ``_resolve_hermes_bin_dir`` asks ``pm.environments.payload_command_dir`` whether the
+    tree is a sealed payload, which probes ``<checkout>/../manifest.json``. A default
+    install checks the repo out inside the real home, so that probe is the one real-home
+    read the HomeIOGuard refuses in this file. ``None`` is the resolver's documented
+    "no managed install found" result (see tests/tools/test_persist_on_release.py)."""
+    from tools.environments import local as local_env
+
+    monkeypatch.setattr(local_env, "_resolve_hermes_bin_dir", lambda: None)
+
+
 def test_execution_owner_moves_to_external_worker_before_running(
     execution_ledger, monkeypatch
 ):
@@ -320,7 +334,9 @@ def test_scoped_wrapper_exit_without_user_bus_names_the_cause_and_invalidates_pr
     assert pr._SYSTEMD_SCOPE_AVAILABLE is False
 
 
-def test_launch_external_worker_treats_a_routed_fire_as_multiplexed(tmp_path, monkeypatch):
+def test_launch_external_worker_treats_a_routed_fire_as_multiplexed(
+    tmp_path, monkeypatch, no_real_hermes_install
+):
     """A fire routed to another profile is multiplexed at the handoff boundary (#107695 review on
     f5f88d5058). ``run_one_job`` only enables the context in ``_install_fire_secret_scope``, which runs
     AFTER this handoff, so a routed desktop fire on the managed path serialized ``multiplex_active=False``
@@ -363,7 +379,7 @@ def test_launch_external_worker_treats_a_routed_fire_as_multiplexed(tmp_path, mo
 
 
 def test_launch_external_worker_uses_restart_safe_scope_and_acknowledges(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, no_real_hermes_install
 ):
     from cron import scheduler
     from tools.env_passthrough import clear_env_passthrough, register_env_passthrough

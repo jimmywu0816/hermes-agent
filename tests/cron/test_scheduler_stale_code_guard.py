@@ -15,7 +15,9 @@ without a git binary on PATH must keep working.
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from cron.scheduler import _repo_code_fingerprint, _stale_code_abort_reason, run_job
@@ -170,13 +172,35 @@ def test_abort_reason_names_both_heads():
 
 # --- run_job integration -------------------------------------------------------------------
 
+_EXECUTION_ID = "stale-guard-fire"
+
+
+@contextmanager
+def _owner_execution(job):
+    """Bind the job's own gateway execution for the duration of the inline ``run_job`` body.
+
+    Without a bound execution ``run_job`` delegates to the canonical gateway admission instead of
+    running the inline worker body that holds the stale-code guard (cron/scheduler.py:2681-2688).
+    Bind the same ContextVar ``gateway.session_cron.execute`` binds, with the identity the
+    ``owner_execution[2:]`` check compares, and reset it so the execution cannot leak to another test.
+    """
+    from gateway.session_cron import _execution, bind_execution
+
+    token = bind_execution(
+        SimpleNamespace(db=None), f"cron_{job['id']}_{_EXECUTION_ID}", job["id"], _EXECUTION_ID)
+    try:
+        yield
+    finally:
+        _execution.reset(token)
+
 
 def test_run_job_aborts_before_constructing_agent_on_code_change(tmp_path):
     """The stale-worker path: start fingerprint differs from the pre-construction check."""
     job = {"id": "stale-code-guard", "name": "stale guard test", "prompt": "hello"}
     fingerprints = iter([_START, _CHANGED])
 
-    with patch("cron.scheduler._hermes_home", tmp_path), \
+    with _owner_execution(job), \
+         patch("cron.scheduler._hermes_home", tmp_path), \
          patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
          patch("hermes_cli.env_loader.load_hermes_dotenv"), \
          patch("hermes_cli.env_loader.reset_secret_source_cache"), \
@@ -184,7 +208,7 @@ def test_run_job_aborts_before_constructing_agent_on_code_change(tmp_path):
          patch("cron.scheduler._repo_code_fingerprint", side_effect=lambda: next(fingerprints)), \
          patch("cron.scheduler._open_cron_session_db") as open_db, \
          patch("cron.scheduler._construct_cron_agent") as construct:
-        success, output, final_response, error = run_job(job)
+        success, output, final_response, error = run_job(job, execution_id=_EXECUTION_ID)
 
     assert success is False
     assert error and "Stale cron worker aborted" in error
@@ -213,7 +237,8 @@ def test_run_job_probe_order_and_no_setup_before_check(tmp_path):
         order.append("prerun")
         return (True, "ok\n")  # non-empty output: the wake gate and prompt build both proceed
 
-    with patch("cron.scheduler._hermes_home", tmp_path), \
+    with _owner_execution(job), \
+         patch("cron.scheduler._hermes_home", tmp_path), \
          patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
          patch("hermes_cli.env_loader.load_hermes_dotenv"), \
          patch("hermes_cli.env_loader.reset_secret_source_cache"), \
@@ -228,7 +253,7 @@ def test_run_job_probe_order_and_no_setup_before_check(tmp_path):
          patch("cron.scheduler._construct_cron_agent") as construct:
         saved_run_agent = sys.modules.pop("run_agent", None)
         try:
-            success, output, final_response, error = run_job(job)
+            success, output, final_response, error = run_job(job, execution_id=_EXECUTION_ID)
             run_agent_imported = "run_agent" in sys.modules
         finally:
             if saved_run_agent is not None:
@@ -255,15 +280,19 @@ def test_run_job_constructs_normally_when_fingerprint_unchanged(tmp_path):
     fake_agent.run_conversation.return_value = {"final_response": "ok"}
     constructed.return_value = fake_agent
 
-    with patch("cron.scheduler._hermes_home", tmp_path), \
+    # The inline path imports run_agent, whose bootstrap probes <home>/manifest.json for a sealed
+    # payload. Keep that probe hermetic: the isolated test home is fixtures, not a payload.
+    with _owner_execution(job), \
+         patch("cron.scheduler._hermes_home", tmp_path), \
          patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
          patch("hermes_cli.env_loader.load_hermes_dotenv"), \
          patch("hermes_cli.env_loader.reset_secret_source_cache"), \
          patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=_RUNTIME), \
+         patch("pm.environments.payload_venv", return_value=None), \
          patch("cron.scheduler._open_cron_session_db", return_value=None), \
          patch("cron.scheduler._repo_code_fingerprint", return_value=_START), \
          patch("cron.scheduler._construct_cron_agent", constructed):
-        success, output, final_response, error = run_job(job)
+        success, output, final_response, error = run_job(job, execution_id=_EXECUTION_ID)
 
     assert constructed.called
     assert success is True
